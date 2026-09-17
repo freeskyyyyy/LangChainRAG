@@ -1,0 +1,58 @@
+# ============================================================
+#  企业级 RAG 知识库问答系统 — 后端依赖清单
+#  安装命令（国内镜像）：
+#     .venv\Scripts\python.exe -m pip install -r backend\requirements.txt
+# ============================================================
+
+# ---------- Web 框架 ----------
+fastapi                     # 异步 Web 框架，自带交互式 API 文档页
+uvicorn[standard]           # ASGI 服务器，负责实际把服务跑起来
+python-multipart            # 解析文件上传表单（知识库上传文档要用）
+
+# ---------- 数据校验与配置 ----------
+pydantic                    # 数据校验：自动检查请求参数格式对不对
+pydantic-settings           # 从 .env 文件读取配置
+
+# ---------- 数据库 ----------
+sqlalchemy                  # ORM：把数据库表映射成 Python 对象
+aiosqlite                   # SQLite 的异步驱动（配合 FastAPI 的 async）
+
+# ---------- 认证与安全 ----------
+bcrypt                      # 密码单向哈希加密（绝不存明文密码）
+pyjwt                       # 生成和校验 JWT 登录令牌
+
+# ---------- 流式输出 ----------
+sse-starlette               # SSE（服务器推送）：实现打字机式流式回答
+
+# ---------- 缓存与限流 ----------
+cachetools                  # 内存缓存（TTL 过期策略），预留 Redis 插槽
+
+# ---------- 日志 ----------
+loguru                      # 比标准 logging 好用得多的日志库
+
+# ---------- LangChain 核心 ----------
+langchain                   # LangChain 主包
+langchain-core              # 核心抽象：消息、提示词模板、LCEL 表达式
+langchain-community         # 社区集成：各种文档加载器、向量库适配
+langchain-text-splitters    # 文本切分器
+
+# ---------- 阿里云百炼（DashScope）----------
+dashscope                   # 阿里云官方 SDK，提供通义千问对话/向量化/重排序接口
+
+# ---------- 向量库 ----------
+langchain-chroma            # LangChain 与 Chroma 的适配层
+chromadb                    # 向量数据库本体（本地文件夹，无需 Docker）
+
+# ---------- 检索增强 ----------
+rank_bm25                   # BM25 关键词检索算法（纯 Python，用于混合检索）
+
+# ---------- 文档解析（多格式）----------
+pypdf                       # 解析 PDF
+python-docx                 # 解析 Word (.docx)
+openpyxl                    # 解析 Excel (.xlsx)
+pandas                      # 表格数据处理（Excel → 结构化文本）
+markdown                    # 解析 Markdown
+beautifulsoup4              # 解析 HTML / 清洗网页标签
+
+# ---------- 其他 ----------
+httpx                       # 异步 HTTP 客户端

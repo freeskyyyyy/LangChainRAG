@@ -1,0 +1,182 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>服饰知识助手</title>
+<link rel="stylesheet" href="/static/app.css">
+<!--
+  网页图标用的是 SVG 内联数据，不需要额外的图片文件。
+  好处：整个前端就是三个纯文本文件，复制到哪都能跑，不会出现"图标丢了"。
+-->
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🌿</text></svg>">
+</head>
+<body>
+
+<!-- ================================================================
+     登录页
+     ================================================================ -->
+<div class="login-view" id="login-view">
+  <div class="login-card">
+    <h1>🌿 服饰知识助手</h1>
+    <div class="sub">基于知识库的智能问答 · 回答有据可查</div>
+
+    <div class="field">
+      <label>用户名</label>
+      <input id="username" placeholder="请输入用户名" autocomplete="username">
+    </div>
+
+    <div class="field">
+      <label>密码</label>
+      <input id="password" type="password" placeholder="请输入密码" autocomplete="current-password">
+    </div>
+
+    <button class="btn-primary" id="login-btn">登 录</button>
+    <div class="err" id="login-err"></div>
+
+    <div class="link-row">
+      还没有账号？<a id="to-register">注册一个</a>
+    </div>
+
+    <div class="hint">
+      <b>管理员账号</b>：admin / 123456<br>
+      管理员可以上传资料、管理知识库；普通用户只能提问。
+    </div>
+  </div>
+</div>
+
+<!-- ================================================================
+     注册页（和登录页长得一样，只是字段不同）
+     ================================================================ -->
+<div class="login-view" id="register-view" style="display:none">
+  <div class="login-card">
+    <h1>注册账号</h1>
+    <div class="sub">注册后即可开始提问</div>
+
+    <div class="field">
+      <label>用户名</label>
+      <input id="reg-username" placeholder="3~50 个字符，只能用字母数字下划线" autocomplete="username">
+    </div>
+
+    <div class="field">
+      <label>密码</label>
+      <input id="reg-password" type="password" placeholder="至少 6 位" autocomplete="new-password">
+    </div>
+
+    <div class="field">
+      <label>确认密码</label>
+      <input id="reg-password2" type="password" placeholder="再输一遍" autocomplete="new-password">
+    </div>
+
+    <button class="btn-primary" id="register-btn">注 册</button>
+    <div class="err" id="register-err"></div>
+
+    <div class="link-row">
+      已经有账号了？<a id="to-login">返回登录</a>
+    </div>
+  </div>
+</div>
+
+<!-- ================================================================
+     主界面
+     ================================================================ -->
+<div class="app-view" id="app-view">
+
+  <!-- ---------- 顶栏 ---------- -->
+  <header class="topbar">
+    <button class="menu-btn" id="menu-btn">☰</button>
+    <div class="brand"><span class="leaf">🌿</span>服饰知识助手</div>
+    <span class="badge" id="role-badge">用户</span>
+    <div class="spacer"></div>
+    <span class="who" id="whoami"></span>
+    <button class="ghost-btn" id="logout-btn">退出</button>
+  </header>
+
+  <div class="layout">
+
+    <!-- ---------- 左侧栏 ---------- -->
+    <aside class="sidebar" id="sidebar">
+
+      <!-- 会话列表：占满上半部分 -->
+      <section class="side-section sessions-section">
+        <div class="side-head">
+          <span>对话</span>
+          <button class="icon-btn" id="new-chat-btn" title="新建对话">＋</button>
+        </div>
+        <div class="session-list" id="session-list"></div>
+      </section>
+
+      <!-- 知识库：只有管理员看得到，可以折叠 -->
+      <section class="side-section kb-section" id="kb-section" style="display:none">
+        <div class="side-head collapsible" id="kb-head">
+          <span>📚 知识库</span>
+          <span class="chev">▾</span>
+        </div>
+
+        <div class="kb-body" id="kb-body">
+          <div class="kb-stat" id="kb-stat">加载中…</div>
+
+          <div class="upload-area" id="upload-area">
+            点击或拖拽文件到这里上传<br>
+            <span style="font-size:11px">支持 PDF / Word / Excel / MD / TXT / HTML</span>
+          </div>
+          <input type="file" id="file-input" style="display:none" multiple
+                 accept=".pdf,.docx,.doc,.xlsx,.xls,.csv,.md,.txt,.html,.htm">
+
+          <div id="doc-list"></div>
+        </div>
+      </section>
+
+    </aside>
+
+    <!-- ---------- 聊天区 ---------- -->
+    <main class="chat">
+      <div class="messages" id="messages"></div>
+
+      <div class="composer">
+        <div class="composer-box">
+          <textarea id="question" rows="1"
+                    placeholder="输入你的问题…"></textarea>
+
+          <!-- 停止：只在"正在生成"时出现，和发送按钮占同一个位置 -->
+          <button class="stop-btn" id="stop-btn" title="停止生成" style="display:none">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor">
+              <rect x="5" y="5" width="14" height="14" rx="2.5"></rect>
+            </svg>
+          </button>
+
+          <button class="send-btn" id="send-btn" title="发送">
+            <svg width="17" height="17" viewBox="0 0 24 24" fill="none"
+                 stroke="currentColor" stroke-width="2.2"
+                 stroke-linecap="round" stroke-linejoin="round">
+              <line x1="12" y1="19" x2="12" y2="5"></line>
+              <polyline points="5 12 12 5 19 12"></polyline>
+            </svg>
+          </button>
+        </div>
+        <div class="composer-hint">Enter 发送 · Shift + Enter 换行</div>
+      </div>
+    </main>
+
+  </div>
+</div>
+
+<!-- ================================================================
+     重命名弹窗（不引入第三方弹窗库，用原生元素自己搭）
+     ================================================================ -->
+<div class="modal-mask" id="rename-mask">
+  <div class="modal">
+    <h3>重命名对话</h3>
+    <input id="rename-input" maxlength="60" placeholder="给这段对话起个名字">
+    <div class="modal-actions">
+      <button class="btn-ghost" id="rename-cancel">取消</button>
+      <button class="btn-solid" id="rename-ok">保存</button>
+    </div>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script src="/static/app.js"></script>
+</body>
+</html>

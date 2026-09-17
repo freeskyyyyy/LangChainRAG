@@ -1,0 +1,74 @@
+# ============================================================
+#  Git 忽略清单
+#  被列在这里的文件/文件夹，不会被提交到代码仓库。
+#  「.env」是重点保护对象 —— 里面存着 API Key。
+# ============================================================
+
+# ---------- 敏感配置（绝不提交）----------
+# 【注意】.gitignore 里**不支持行尾注释**。
+# 以前这里写过 `!.env.example   # 配置模板要提交`，
+# 结果 git 把整个字符串当成文件名去匹配，一个都没匹配上，
+# 那行等于白写（幸好 .env.example 本来就不在忽略范围内，没出事）。
+# 注释只能单独占一行，或者写在要忽略的那条规则上面。
+.env
+.env.local
+.env.*.local
+
+# 配置模板要提交，方便换电脑时照着填
+!.env.example
+
+# ---------- Python ----------
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.venv/
+venv/
+env/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# ---------- 数据文件（体积大 / 含隐私 / 可重新生成）----------
+# 这几样都是"跑起来就会自己生成"的东西，不该进代码仓库：
+#   app.db     —— 里面有用户的对话记录、账号密码哈希，属于隐私数据
+#   chroma/    —— 向量库，几百 MB，换台电脑重新跑一遍就重建了
+#   uploads/   —— 用户上传的原始文档
+#   logs/      —— 运行日志，还夹着测试报告
+backend/data/app.db
+backend/data/app.db-journal
+backend/data/app.db-wal
+backend/data/chroma/
+backend/data/uploads/
+backend/data/logs/
+backend/data/_compare_chroma/
+*.log
+
+# ---------- Claude Code 的个人配置 ----------
+# settings.local.json 记的是"这台电脑上允许了哪些命令"，因人而异，不该共享
+.claude/settings.local.json
+
+# ---------- 前端 ----------
+node_modules/
+frontend/dist/
+frontend/.vite/
+frontend/.cache/
+npm-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+.pnpm-store/
+
+# ---------- 开发工具 ----------
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# ---------- 临时文件 ----------
+*.tmp
+*.bak
+*~
+~$*.docx
+~$*.xlsx
