@@ -296,6 +296,7 @@ async def get_document_chunks(
             "chunk_count": doc.chunk_count,
             "parent_chunk_count": doc.parent_chunk_count,
             "char_count": doc.char_count,
+            "error_msg": doc.error_msg,
         },
         "items": [
             {

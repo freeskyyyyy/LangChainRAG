@@ -2,7 +2,7 @@ r"""
 阿里云百炼 API 连通性测试
 
 【为什么必须测这个】
-我在 .env 里写的模型名（qwen-plus / text-embedding-v4 / gte-rerank-v2）
+我在 .env 里写的模型名（qwen-plus / text-embedding-v4 / qwen3-rerank）
 是**根据经验填的默认值**，不保证在你账号下一定可用：
   · 阿里会不时更新模型版本、下线旧版本
   · 不同账号开通的服务范围可能不同
@@ -30,7 +30,7 @@ EMBED_CANDIDATES = [
     "text-embedding-v2",
     "text-embedding-v1",
 ]
-RERANK_CANDIDATES = ["gte-rerank-v2", "gte-rerank"]
+RERANK_CANDIDATES = ["qwen3-rerank", "qwen3.7-text-rerank"]
 
 LINE = "=" * 68
 

@@ -28,6 +28,7 @@ env/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+jieba.cache
 
 # ---------- 数据文件（体积大 / 含隐私 / 可重新生成）----------
 # 这几样都是"跑起来就会自己生成"的东西，不该进代码仓库：

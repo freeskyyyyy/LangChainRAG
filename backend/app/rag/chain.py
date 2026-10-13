@@ -43,8 +43,6 @@ from typing import Any, AsyncGenerator, Optional
 from app.core.config import settings
 from app.core.logging import logger
 from app.rag.prompt import (
-    LOW_CONFIDENCE_ANSWER,
-    NO_CONTEXT_ANSWER,
     build_context,
     build_rag_prompt,
 )
@@ -187,9 +185,8 @@ class RAGChain:
 
         # ---------------- ⑤ 相关性阈值检查 ----------------
         # 【这一步是 RAG 可靠性的关键】
-        # 如果检索到的片段相关度都很低，说明知识库里根本没有相关内容。
-        # 这时候如果硬把资料塞给模型，模型很可能"强行关联"——编出一个答案。
-        # 宁可直接说"没找到"，也不能给用户错误信息。
+        # 低相关片段不能硬塞给模型；清空后让模型切换到通用知识回答，
+        # 并在提示词中要求它明确标注依据，避免把通用知识伪装成库内资料。
         #
         # ⚠️ 注意这里用 _get_threshold() 而不是直接读配置：
         #    重排序分数和向量相似度的量纲完全不同，必须各用各的阈值。
@@ -197,34 +194,30 @@ class RAGChain:
         top_score = self._normalize_score(chunks[0]) if chunks else 0.0
         threshold = self._get_threshold(chunks[0]) if chunks else settings.RERANK_SCORE_THRESHOLD
 
+        knowledge_source = "knowledge_base"
         if not chunks or top_score < threshold:
             logger.info(
-                f"检索结果相关度不足，直接返回兜底回答 | "
+                f"知识库没有足够相关的资料，改用模型通用知识回答 | "
                 f"最高分={top_score:.4f} < 阈值{threshold} | "
                 f"query={search_query[:50]!r}"
             )
-            timings["total_ms"] = round((time.perf_counter() - t_start) * 1000, 1)
-            return {
-                "cached": None,
-                "no_answer": True,
-                "answer": LOW_CONFIDENCE_ANSWER if chunks else NO_CONTEXT_ANSWER,
-                "search_query": search_query,
-                "chunks": [],
-                "prompt_input": None,
-                "timings": timings,
-                "rewrite": rewrite_result,
-                "top_score": top_score,
-            }
+            chunks = []
+            knowledge_source = "general"
 
         # ---------------- ⑥ 组装提示词 ----------------
         t0 = time.perf_counter()
-        context = build_context(chunks, max_chunks=settings.MAX_CONTEXT_CHUNKS)
+        context = (
+            build_context(chunks, max_chunks=settings.MAX_CONTEXT_CHUNKS)
+            if chunks
+            else "知识库没有检索到与问题直接相关的资料。请基于通用知识回答，并明确标注依据。"
+        )
         prompt_input = {"context": context, "question": question}
         timings["prompt_ms"] = round((time.perf_counter() - t0) * 1000, 1)
 
         return {
             "cached": None,
-            "no_answer": False,
+            "no_answer": knowledge_source == "general",
+            "knowledge_source": knowledge_source,
             "search_query": search_query,
             "chunks": chunks,
             "prompt_input": prompt_input,
@@ -348,21 +341,7 @@ class RAGChain:
                 "chunks": [],
                 "timings": timings,
                 "top_score": cached.get("cache_similarity", 1.0),
-            }
-
-        # ---- 无答案兜底 ----
-        if ctx.get("no_answer"):
-            timings["total_ms"] = round((time.perf_counter() - t_start) * 1000, 1)
-            return {
-                "answer": ctx["answer"],
-                "citations": [],
-                "cache_hit": False,
-                "search_query": ctx["search_query"],
-                "rewritten": _rewrite_info(ctx.get("rewrite")),
-                "chunks": [],
-                "timings": timings,
-                "top_score": ctx["top_score"],
-                "no_answer": True,
+                "knowledge_source": cached.get("knowledge_source", "knowledge_base"),
             }
 
         # ---- 调模型生成 ----
@@ -377,7 +356,10 @@ class RAGChain:
         # ---- 写入语义缓存 ----
         if self.enable_cache and use_cache:
             try:
-                get_semantic_cache().store(question, answer, citations)
+                get_semantic_cache().store(
+                    question, answer, citations,
+                    extra={"knowledge_source": ctx["knowledge_source"]},
+                )
             except Exception as e:
                 logger.warning(f"写入语义缓存失败（不影响回答）: {e}")
 
@@ -390,6 +372,8 @@ class RAGChain:
             "chunks": ctx["chunks"],
             "timings": timings,
             "top_score": ctx["top_score"],
+            "knowledge_source": ctx["knowledge_source"],
+            "no_answer": ctx["no_answer"],
         }
 
     # ==============================================================
@@ -448,6 +432,8 @@ class RAGChain:
                     "data": {
                         "cache_hit": True,
                         "cache_similarity": cached.get("cache_similarity"),
+                        "knowledge_source": cached.get("knowledge_source", "knowledge_base"),
+                        "no_answer": cached.get("knowledge_source") == "general",
                         "matched_question": cached.get("cache_matched_question"),
                         "latency_ms": round((time.perf_counter() - t_start) * 1000),
                         "timings": ctx["timings"],
@@ -466,49 +452,34 @@ class RAGChain:
                     },
                 }
 
-            # ---- 无答案兜底 ----
-            if ctx.get("no_answer"):
+            # ---- 报告回答依据 ----
+            chunks = ctx["chunks"]
+            if ctx["knowledge_source"] == "general":
                 yield {
                     "event": "status",
                     "data": {
-                        "stage": "no_answer",
-                        "message": "知识库中没有找到相关内容",
+                        "stage": "general_knowledge",
+                        "message": "资料库没有找到直接相关内容，正在按通用知识回答",
                         "top_score": ctx["top_score"],
                     },
                 }
-                for piece in _chunk_text(ctx["answer"], 12):
-                    yield {"event": "token", "data": {"text": piece}}
-                    await asyncio.sleep(0.008)
-
-                yield {"event": "citations", "data": []}
+            else:
+                # ---- 检索成功：报告检索情况 ----
                 yield {
-                    "event": "done",
+                    "event": "retrieval",
                     "data": {
-                        "cache_hit": False,
-                        "no_answer": True,
-                        "latency_ms": round((time.perf_counter() - t_start) * 1000),
-                        "timings": ctx["timings"],
+                        "count": len(chunks),
+                        "top_score": ctx["top_score"],
+                        "sources": [
+                            {"file": c.get("file_name"), "page": c.get("page")}
+                            for c in chunks[:5]
+                        ],
                     },
                 }
-                return
-
-            # ---- 检索成功：报告检索情况 ----
-            chunks = ctx["chunks"]
-            yield {
-                "event": "retrieval",
-                "data": {
-                    "count": len(chunks),
-                    "top_score": ctx["top_score"],
-                    "sources": [
-                        {"file": c.get("file_name"), "page": c.get("page")}
-                        for c in chunks[:5]
-                    ],
-                },
-            }
-            yield {
-                "event": "status",
-                "data": {"stage": "generating", "message": "正在组织回答…"},
-            }
+                yield {
+                    "event": "status",
+                    "data": {"stage": "generating", "message": "正在组织回答…"},
+                }
 
             # ---------------- 流式生成 ----------------
             t_gen = time.perf_counter()
@@ -558,7 +529,8 @@ class RAGChain:
             if self.enable_cache and use_cache and answer:
                 try:
                     await asyncio.to_thread(
-                        get_semantic_cache().store, question, answer, citations
+                        get_semantic_cache().store, question, answer, citations,
+                        extra={"knowledge_source": ctx["knowledge_source"]}
                     )
                 except Exception as e:
                     logger.warning(f"写入语义缓存失败: {e}")
@@ -570,6 +542,8 @@ class RAGChain:
                     "latency_ms": round((time.perf_counter() - t_start) * 1000),
                     "search_query": ctx["search_query"],
                     "top_score": ctx["top_score"],
+                    "knowledge_source": ctx["knowledge_source"],
+                    "no_answer": ctx["no_answer"],
                     "timings": timings,
                 },
             }

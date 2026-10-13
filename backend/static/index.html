@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>服饰知识助手</title>
+<title>知识库问答助手</title>
 <link rel="stylesheet" href="/static/app.css">
 <!--
   网页图标用的是 SVG 内联数据，不需要额外的图片文件。
@@ -18,8 +18,8 @@
      ================================================================ -->
 <div class="login-view" id="login-view">
   <div class="login-card">
-    <h1>🌿 服饰知识助手</h1>
-    <div class="sub">基于知识库的智能问答 · 回答有据可查</div>
+    <h1>🌿 知识库问答助手</h1>
+    <div class="sub">上传资料，随时提问 · 支持通用知识问答</div>
 
     <div class="field">
       <label>用户名</label>
@@ -85,10 +85,12 @@
   <!-- ---------- 顶栏 ---------- -->
   <header class="topbar">
     <button class="menu-btn" id="menu-btn">☰</button>
-    <div class="brand"><span class="leaf">🌿</span>服饰知识助手</div>
+    <div class="brand"><span class="leaf">🌿</span>知识库问答助手</div>
     <span class="badge" id="role-badge">用户</span>
     <div class="spacer"></div>
-    <span class="who" id="whoami"></span>
+    <button class="ghost-btn account-btn" id="account-btn" aria-haspopup="dialog" title="个人设置：修改昵称或密码">
+      <span class="who" id="whoami"></span><span class="account-label">设置</span>
+    </button>
     <button class="ghost-btn" id="logout-btn">退出</button>
   </header>
 
@@ -124,6 +126,11 @@
                  accept=".pdf,.docx,.doc,.xlsx,.xls,.csv,.md,.txt,.html,.htm">
 
           <div id="doc-list"></div>
+          <div class="kb-pagination" id="doc-pagination" hidden>
+            <button class="btn-ghost" id="doc-prev" type="button">上一页</button>
+            <span id="doc-page" aria-live="polite"></span>
+            <button class="btn-ghost" id="doc-next" type="button">下一页</button>
+          </div>
         </div>
       </section>
 
@@ -174,6 +181,78 @@
     </div>
   </div>
 </div>
+
+<!-- 原生 dialog 自带焦点约束、Esc 关闭和背景隔离。 -->
+<dialog class="account-dialog" id="account-dialog" aria-labelledby="account-title">
+  <div class="account-heading">
+    <h2 id="account-title">个人设置</h2>
+    <button class="btn-ghost" id="account-close" type="button" aria-label="关闭个人设置">关闭</button>
+  </div>
+  <p class="account-summary" id="account-summary"></p>
+  <form id="profile-form">
+    <h3>修改昵称</h3>
+    <div class="field">
+      <label for="profile-nickname">昵称</label>
+      <input id="profile-nickname" required maxlength="50" autocomplete="nickname" aria-describedby="profile-error">
+    </div>
+    <p class="account-error" id="profile-error" role="alert"></p>
+    <div class="account-actions">
+      <span id="profile-status" role="status"></span>
+      <button class="btn-solid" id="profile-save" type="submit">保存昵称</button>
+    </div>
+  </form>
+  <form id="password-form">
+    <h3>修改密码</h3>
+    <p class="account-hint">修改成功后，请使用新密码重新登录。</p>
+    <div class="field">
+      <label for="current-password">当前密码</label>
+      <input id="current-password" type="password" required maxlength="64" autocomplete="current-password">
+    </div>
+    <div class="field">
+      <label for="new-password">新密码</label>
+      <input id="new-password" type="password" required minlength="6" maxlength="64" autocomplete="new-password" aria-describedby="password-hint password-error">
+      <small id="password-hint">6～64 个字符，不超过 72 字节，首尾不能有空白。</small>
+    </div>
+    <div class="field">
+      <label for="confirm-password">确认新密码</label>
+      <input id="confirm-password" type="password" required minlength="6" maxlength="64" autocomplete="new-password" aria-describedby="password-error">
+    </div>
+    <p class="account-error" id="password-error" role="alert"></p>
+    <div class="account-actions">
+      <button class="btn-solid" id="password-save" type="submit">修改密码</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog class="account-dialog kb-dialog" id="kb-dialog" aria-labelledby="kb-title">
+  <div class="account-heading">
+    <h2 id="kb-title">文档片段</h2>
+    <button class="btn-ghost" id="kb-close" type="button">关闭</button>
+  </div>
+  <p class="kb-filename" id="kb-filename"></p>
+  <p class="account-summary" id="kb-doc-summary"></p>
+  <p class="account-error" id="kb-doc-error"></p>
+  <div class="kb-toolbar">
+    <span>子片段用于检索，父片段提供上下文。</span>
+    <button class="btn-ghost" id="kb-reindex" type="button">重建索引</button>
+  </div>
+  <div class="kb-confirm" id="kb-reindex-confirm" hidden>
+    <p>将按当前切分参数重新解析原文件并替换旧片段，可能需要几十秒。处理期间该文档的检索可能暂时不可用。</p>
+    <div class="modal-actions">
+      <button class="btn-ghost" id="kb-reindex-cancel" type="button">取消</button>
+      <button class="btn-solid" id="kb-reindex-ok" type="button">确认重建</button>
+    </div>
+  </div>
+  <p class="account-error" id="kb-error" role="alert"></p>
+  <p class="kb-notice" id="kb-notice" role="status"></p>
+  <button class="btn-ghost" id="kb-retry" type="button" hidden>重新加载片段</button>
+  <div id="chunk-list" aria-busy="false"></div>
+  <div class="kb-pagination">
+    <button class="btn-ghost" id="chunk-prev" type="button">上一页</button>
+    <span id="chunk-page" aria-live="polite"></span>
+    <button class="btn-ghost" id="chunk-next" type="button">下一页</button>
+  </div>
+</dialog>
 
 <div class="toast" id="toast"></div>
 

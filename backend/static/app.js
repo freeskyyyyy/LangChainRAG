@@ -1,5 +1,5 @@
 /* ==================================================================
-   服饰知识助手 · 前端逻辑
+   知识库问答助手 · 前端逻辑
    ==================================================================
 
    【这个文件负责什么】
@@ -86,15 +86,17 @@ async function api(path, options = {}) {
 
   const res = await fetch(path, { ...options, headers });
 
-  if (res.status === 401) {
+  const text = await res.text();
+  let data;
+  try { data = text ? JSON.parse(text) : null; } catch { data = { raw: text }; }
+
+  // 修改密码时输错旧密码也是 401，但不代表登录令牌失效。
+  const wrongCurrentPassword = path === '/api/auth/change-password' && data?.code === 40120;
+  if (res.status === 401 && !wrongCurrentPassword) {
     // 令牌过期或失效 → 退回登录页
     doLogout(true);
     throw new Error('登录已过期，请重新登录');
   }
-
-  const text = await res.text();
-  let data;
-  try { data = text ? JSON.parse(text) : null; } catch { data = { raw: text }; }
 
   if (!res.ok) {
     // 后端的错误信息字段叫 message（见 app/core/exceptions.py）
@@ -239,6 +241,10 @@ async function doRegister() {
 }
 
 function doLogout(silent = false) {
+  if (state.abort) state.abort.abort();
+  resetKnowledgeView();
+  if ($('account-dialog').open) $('account-dialog').close();
+  clearAccountForms();
   // 主动退出时告诉后端一声（后端可记录登出日志）；
   // 被动退出（令牌过期）就跳过，因为那个请求本身也会 401
   if (!silent && state.token) {
@@ -256,6 +262,116 @@ function doLogout(silent = false) {
   $('reg-password2').value = '';
   showView('login');
   $('username').focus();
+}
+
+// 个人设置：复用已有认证接口，不切换或清空当前会话。
+let accountBusy = false;
+
+function clearAccountForms() {
+  $('profile-form').reset();
+  $('password-form').reset();
+  $('profile-error').textContent = '';
+  $('password-error').textContent = '';
+  $('profile-status').textContent = '';
+}
+
+function openAccountDialog() {
+  if (!state.user || accountBusy) return;
+  clearAccountForms();
+  $('account-summary').textContent = `账号：${state.user.username} · ${state.user.role === 'admin' ? '管理员' : '普通用户'}`;
+  $('profile-nickname').value = state.user.nickname || state.user.username;
+  $('account-dialog').showModal();
+  $('profile-nickname').focus();
+}
+
+function setAccountBusy(busy, button, label) {
+  accountBusy = busy;
+  $('account-dialog').setAttribute('aria-busy', String(busy));
+  $('account-dialog').querySelectorAll('input, button').forEach(el => { el.disabled = busy; });
+  button.textContent = label;
+}
+
+async function saveProfile(e) {
+  e.preventDefault();
+  if (accountBusy || !state.user) return;
+  const nickname = $('profile-nickname').value.trim();
+  const error = $('profile-error');
+  error.textContent = '';
+  $('profile-status').textContent = '';
+  if (!nickname || [...nickname].length > 50) {
+    error.textContent = '昵称请输入 1～50 个字符，不能全是空白';
+    return;
+  }
+  const token = state.token;
+  const button = $('profile-save');
+  setAccountBusy(true, button, '保存中…');
+  try {
+    const user = await api('/api/auth/me', {
+      method: 'PATCH', body: JSON.stringify({ nickname }),
+    });
+    if (state.token !== token) return;
+    state.user = user;
+    $('whoami').textContent = user.nickname || user.username;
+    $('profile-nickname').value = user.nickname || user.username;
+    $('profile-status').textContent = '昵称已保存';
+  } catch (err) {
+    if (state.token === token) error.textContent = err.message;
+  } finally {
+    setAccountBusy(false, button, '保存昵称');
+  }
+}
+
+async function savePassword(e) {
+  e.preventDefault();
+  if (accountBusy || !state.user) return;
+  const error = $('password-error');
+  error.textContent = '';
+  const oldPassword = $('current-password').value;
+  const newPassword = $('new-password').value;
+  if (state.sending) {
+    error.textContent = '请等待回答完成，或停止生成后再修改密码';
+    return;
+  }
+  if (!oldPassword) {
+    error.textContent = '请输入当前密码';
+    return;
+  }
+  if ([...newPassword].length < 6 || [...newPassword].length > 64) {
+    error.textContent = '新密码长度须为 6～64 个字符';
+    return;
+  }
+  if (new TextEncoder().encode(newPassword).length > 72 || newPassword.trim() !== newPassword) {
+    error.textContent = '新密码不能超过 72 字节，首尾不能有空白';
+    return;
+  }
+  if (newPassword === oldPassword) {
+    error.textContent = '新密码不能与当前密码相同';
+    return;
+  }
+  if (newPassword !== $('confirm-password').value) {
+    error.textContent = '两次输入的新密码不一致';
+    return;
+  }
+  const token = state.token;
+  const username = state.user.username;
+  const button = $('password-save');
+  setAccountBusy(true, button, '修改中…');
+  try {
+    await api('/api/auth/change-password', {
+      method: 'POST', body: JSON.stringify({ old_password: oldPassword, new_password: newPassword }),
+    });
+    if (state.token !== token) return;
+    doLogout(true);
+    $('username').value = username;
+    $('password').focus();
+    toast('密码修改成功，请使用新密码登录', 4000);
+  } catch (err) {
+    if (state.token === token) error.textContent = err.message;
+  } finally {
+    // 成功、失败都不保留密码；昵称和会话不受失败请求影响。
+    $('password-form').reset();
+    setAccountBusy(false, button, '修改密码');
+  }
 }
 
 /** 进入主界面 */
@@ -442,16 +558,16 @@ async function deleteSession(session) {
 function renderWelcome() {
   $('messages').innerHTML = `
     <div class="welcome" id="welcome">
-      <h2>🌿 你好，我是服饰知识助手</h2>
+      <h2>🌿 你好，我是知识库问答助手</h2>
       <p>
-        我会先在你的知识库里查找资料，再基于资料回答，<br>
-        并标出每句话来自哪份文件。资料里没有的，我会直接说不知道。
+        我会优先参考你上传的资料回答，并标注资料来源。<br>
+        资料不足时，也可以基于模型的通用知识回答，并说明回答依据。
       </p>
       <div class="sugg-grid">
-        <button class="sugg">我身高168体重120斤，穿什么尺码</button>
-        <button class="sugg">黄皮适合穿什么颜色的衣服</button>
-        <button class="sugg">真丝连衣裙怎么洗</button>
-        <button class="sugg">羽绒服可以机洗吗</button>
+        <button class="sugg">总结已上传资料的主要内容</button>
+        <button class="sugg">资料中有哪些注意事项</button>
+        <button class="sugg">根据资料整理一份操作清单</button>
+        <button class="sugg">什么是检索增强生成（RAG）</button>
       </div>
     </div>`;
 
@@ -806,6 +922,9 @@ async function streamAnswer(wrap, question, { regenerate = false } = {}) {
       tags.push('<span class="meta-tag">⏹ 已停止</span>');
     }
     if (donePayload) {
+      if (donePayload.knowledge_source === 'general') {
+        tags.push('<span class="meta-tag">💡 通用知识回答</span>');
+      }
       if (donePayload.cache_hit) {
         const sim = (donePayload.cache_similarity || 1).toFixed(2);
         tags.push(`<span class="meta-tag cache">⚡ 命中缓存（相似度 ${sim}），未消耗额度</span>`);
@@ -982,10 +1101,42 @@ async function loadStats() {
   }
 }
 
-async function loadDocs() {
+const kbView = { doc: null, page: 1, pages: 0, loading: false, rebuilding: false, request: 0 };
+let docsPage = 1;
+let docsPages = 0;
+let docsRequest = 0;
+const documentStatus = { indexed: '已索引', parsing: '处理中', pending: '待处理', failed: '处理失败' };
+
+function resetKnowledgeView() {
+  kbView.request++;
+  kbView.doc = null;
+  kbView.loading = false;
+  kbView.rebuilding = false;
+  docsRequest++;
+  docsPage = 1;
+  if ($('kb-dialog').open) $('kb-dialog').close();
+  $('chunk-list').replaceChildren();
+  $('doc-list').replaceChildren();
+  $('doc-pagination').hidden = true;
+}
+
+async function loadDocs(page = docsPage) {
   if (!state.user || state.user.role !== 'admin') return;
+  const request = ++docsRequest;
+  const token = state.token;
+  $('doc-prev').disabled = true;
+  $('doc-next').disabled = true;
   try {
-    const data = await api('/api/kb/documents?page=1&page_size=50');
+    const data = await api(`/api/kb/documents?page=${page}&page_size=20`);
+    if (request !== docsRequest || token !== state.token) return;
+    // 删除最后一页的最后一项后，回到有效页。
+    if (page > Math.max(1, data.total_pages)) return loadDocs(Math.max(1, data.total_pages));
+    docsPage = data.page;
+    docsPages = data.total_pages;
+    $('doc-pagination').hidden = docsPages <= 1;
+    $('doc-page').textContent = `${docsPage} / ${Math.max(1, docsPages)}`;
+    $('doc-prev').disabled = docsPage <= 1;
+    $('doc-next').disabled = docsPage >= docsPages;
     const list = $('doc-list');
 
     if (!data.items.length) {
@@ -997,20 +1148,130 @@ async function loadDocs() {
       const icon = { indexed: '📄', parsing: '⏳', pending: '⏳', failed: '⚠️' }[d.status] || '📄';
       const color = d.status === 'failed' ? 'color:var(--danger)' : '';
       return `<div class="doc-item" style="${color}">
-        <span>${icon}</span>
-        <span class="name" title="${esc(d.file_name)}">${esc(d.file_name)}</span>
-        <span style="font-size:11px;color:var(--text-3)">${d.chunk_count}段</span>
-        <span class="del" data-id="${d.id}" data-name="${esc(d.file_name)}">×</span>
+        <button class="doc-open" type="button" data-id="${d.id}" title="${esc(d.file_name)} · ${esc(documentStatus[d.status] || d.status)} · 点击预览片段">
+          <span aria-hidden="true">${icon}</span>
+          <span class="name">${esc(d.file_name)}</span>
+          <span class="doc-count">${d.chunk_count}段</span>
+        </button>
+        <button class="del" type="button" data-id="${d.id}" data-name="${esc(d.file_name)}" aria-label="删除 ${esc(d.file_name)}">×</button>
       </div>`;
     }).join('');
 
-    // 用事件委托绑定删除：只绑一次，比给每个 × 单独绑更省
+    list.querySelectorAll('.doc-open').forEach(el => {
+      el.onclick = () => openDocument(data.items.find(d => d.id === Number(el.dataset.id)));
+    });
     list.querySelectorAll('.del').forEach(el => {
       el.onclick = () => removeDoc(Number(el.dataset.id), el.dataset.name);
     });
   } catch (e) {
+    if (request !== docsRequest || token !== state.token) return;
     $('doc-list').innerHTML =
-      `<div class="s-empty" style="color:var(--danger)">加载失败：${esc(e.message)}</div>`;
+      `<div class="s-empty" style="color:var(--danger)">加载失败：${esc(e.message)}</div><button class="btn-ghost" id="docs-retry" type="button">重试</button>`;
+    $('docs-retry').onclick = () => loadDocs(page);
+  }
+}
+
+function updateChunkControls() {
+  const busy = kbView.loading || kbView.rebuilding;
+  $('chunk-prev').disabled = busy || kbView.page <= 1;
+  $('chunk-next').disabled = busy || kbView.page >= kbView.pages;
+  $('kb-reindex').disabled = busy || !kbView.doc || ['parsing', 'pending'].includes(kbView.doc.status);
+  $('kb-reindex-ok').disabled = busy;
+  $('kb-reindex-cancel').disabled = kbView.rebuilding;
+  $('kb-close').disabled = kbView.rebuilding;
+  $('kb-retry').disabled = busy;
+  $('chunk-list').setAttribute('aria-busy', String(busy));
+}
+
+function renderDocumentSummary() {
+  const d = kbView.doc;
+  $('kb-filename').textContent = d.file_name;
+  $('kb-doc-summary').textContent = `${documentStatus[d.status] || d.status} · ${d.chunk_count} 个子片段 · ${d.parent_chunk_count} 个父片段 · ${d.char_count} 字`;
+  $('kb-doc-error').textContent = d.error_msg || '';
+}
+
+function openDocument(doc) {
+  if (!doc || state.user?.role !== 'admin' || kbView.rebuilding) return;
+  kbView.doc = doc;
+  kbView.page = 1;
+  kbView.pages = 0;
+  $('kb-reindex-confirm').hidden = true;
+  $('kb-notice').textContent = '';
+  renderDocumentSummary();
+  if (!$('kb-dialog').open) $('kb-dialog').showModal();
+  loadChunks(1);
+}
+
+async function loadChunks(page = kbView.page) {
+  if (!kbView.doc) return;
+  const id = kbView.doc.id;
+  const token = state.token;
+  const request = ++kbView.request;
+  const current = () => request === kbView.request && token === state.token && kbView.doc?.id === id;
+  kbView.page = page;
+  kbView.loading = true;
+  $('kb-error').textContent = '';
+  $('kb-retry').hidden = true;
+  $('chunk-list').textContent = '正在加载片段…';
+  $('chunk-page').textContent = '';
+  updateChunkControls();
+  try {
+    const data = await api(`/api/kb/documents/${id}/chunks?page=${page}&page_size=20`);
+    if (!current()) return;
+    if (page > Math.max(1, data.total_pages)) return loadChunks(Math.max(1, data.total_pages));
+    kbView.doc = data.document;
+    kbView.page = data.page;
+    kbView.pages = data.total_pages;
+    renderDocumentSummary();
+    $('chunk-page').textContent = `第 ${data.page} / ${Math.max(1, data.total_pages)} 页 · 共 ${data.total} 段`;
+    $('chunk-list').innerHTML = data.items.length ? data.items.map(c => {
+      const location = [c.page != null ? `页码 ${c.page}` : '', c.sheet_name ? `工作表 ${c.sheet_name}` : ''].filter(Boolean).join(' · ');
+      return `<article class="chunk-card">
+        <div class="chunk-meta">片段 ${esc(c.chunk_index + 1)} · ${esc(c.char_count)} 字${location ? ' · ' + esc(location) : ''}</div>
+        <div class="chunk-content">${esc(c.content)}</div>
+        ${c.parent_content ? `<details><summary>展开父片段${c.parent_index != null ? ' ' + esc(c.parent_index + 1) : ''}</summary><div class="chunk-content">${esc(c.parent_content)}</div></details>` : ''}
+      </article>`;
+    }).join('') : '<p class="s-empty">暂无片段。可检查文档状态，或重建索引后重试。</p>';
+  } catch (e) {
+    if (!current()) return;
+    $('chunk-list').replaceChildren();
+    $('kb-error').textContent = '片段加载失败：' + e.message;
+    $('kb-retry').hidden = false;
+  } finally {
+    if (current()) {
+      kbView.loading = false;
+      updateChunkControls();
+    }
+  }
+}
+
+async function reindexDocument() {
+  if (!kbView.doc || kbView.loading || kbView.rebuilding || $('kb-reindex-confirm').hidden) return;
+  const id = kbView.doc.id;
+  const token = state.token;
+  kbView.rebuilding = true;
+  $('kb-error').textContent = '';
+  $('kb-notice').textContent = '正在重建索引，请稍候…';
+  updateChunkControls();
+  try {
+    const result = await api(`/api/kb/documents/${id}/reindex`, { method: 'POST' });
+    if (token !== state.token || kbView.doc?.id !== id) return;
+    $('kb-notice').textContent = `重建完成，共 ${result.chunk_count} 个片段。`;
+    await loadChunks(1);
+  } catch (e) {
+    if (token !== state.token || kbView.doc?.id !== id) return;
+    $('kb-notice').textContent = '';
+    // 失败也重新读取，展示服务端的实际状态和仍可用的片段。
+    await loadChunks(1);
+    if (token !== state.token || kbView.doc?.id !== id) return;
+    $('kb-error').textContent = '重建失败：' + e.message;
+  } finally {
+    if (token === state.token && kbView.doc?.id === id) {
+      kbView.rebuilding = false;
+      $('kb-reindex-confirm').hidden = true;
+      updateChunkControls();
+      await Promise.all([loadDocs(), loadStats()]);
+    }
   }
 }
 
@@ -1051,6 +1312,31 @@ async function uploadFiles(files) {
 $('login-btn').onclick = doLogin;
 $('register-btn').onclick = doRegister;
 $('logout-btn').onclick = () => doLogout(false);
+$('account-btn').onclick = openAccountDialog;
+$('profile-form').onsubmit = saveProfile;
+$('password-form').onsubmit = savePassword;
+$('account-close').onclick = () => { if (!accountBusy) $('account-dialog').close(); };
+$('account-dialog').oncancel = e => { if (accountBusy) e.preventDefault(); };
+$('account-dialog').onclose = clearAccountForms;
+$('doc-prev').onclick = () => loadDocs(docsPage - 1);
+$('doc-next').onclick = () => loadDocs(docsPage + 1);
+$('chunk-prev').onclick = () => loadChunks(kbView.page - 1);
+$('chunk-next').onclick = () => loadChunks(kbView.page + 1);
+$('kb-retry').onclick = () => loadChunks();
+$('kb-close').onclick = () => { if (!kbView.rebuilding) $('kb-dialog').close(); };
+$('kb-dialog').oncancel = e => { if (kbView.rebuilding) e.preventDefault(); };
+$('kb-dialog').onclose = () => {
+  kbView.request++;
+  kbView.doc = null;
+  kbView.loading = false;
+  $('chunk-list').replaceChildren();
+};
+$('kb-reindex').onclick = () => {
+  $('kb-reindex-confirm').hidden = false;
+  $('kb-reindex-ok').focus();
+};
+$('kb-reindex-cancel').onclick = () => { $('kb-reindex-confirm').hidden = true; $('kb-reindex').focus(); };
+$('kb-reindex-ok').onclick = reindexDocument;
 
 $('password').onkeydown = e => { if (e.key === 'Enter') doLogin(); };
 $('username').onkeydown = e => { if (e.key === 'Enter') $('password').focus(); };
