@@ -117,15 +117,40 @@
 
         <div class="kb-body" id="kb-body">
           <div class="kb-stat" id="kb-stat">加载中…</div>
+          <button class="btn-ghost retrieval-entry" id="retrieval-open" type="button" aria-haspopup="dialog">检索测试</button>
 
-          <div class="upload-area" id="upload-area">
+          <button type="button" class="upload-area" id="upload-area">
             点击或拖拽文件到这里上传<br>
-            <span style="font-size:11px">支持 PDF / Word / Excel / MD / TXT / HTML</span>
-          </div>
+            <span style="font-size:11px">支持 PDF / Word / Excel / CSV / MD / TXT / HTML</span>
+          </button>
           <input type="file" id="file-input" style="display:none" multiple
                  accept=".pdf,.docx,.doc,.xlsx,.xls,.csv,.md,.txt,.html,.htm">
 
-          <div id="doc-list"></div>
+          <section id="upload-feedback" class="upload-feedback" aria-label="上传结果" hidden>
+            <p id="upload-summary" role="status"></p>
+            <div id="upload-results"></div>
+            <button class="btn-ghost" id="upload-clear" type="button">清除结果</button>
+          </section>
+          <form id="doc-filter" class="doc-filter" role="search" aria-label="搜索知识库文档">
+            <label for="doc-keyword">文件名</label>
+            <div class="doc-search-row">
+              <input id="doc-keyword" type="search" placeholder="搜索文件名" maxlength="200">
+              <button class="btn-ghost" type="submit">搜索</button>
+            </div>
+            <label for="doc-status">文档状态</label>
+            <div class="doc-search-row">
+              <select id="doc-status">
+                <option value="">全部状态</option>
+                <option value="indexed">已索引</option>
+                <option value="parsing">处理中</option>
+                <option value="pending">待处理</option>
+                <option value="failed">处理失败</option>
+              </select>
+              <button class="btn-ghost" id="doc-filter-clear" type="button">重置</button>
+            </div>
+          </form>
+          <p id="doc-result-summary" class="doc-result-summary" role="status"></p>
+          <div id="doc-list" aria-busy="false"></div>
           <div class="kb-pagination" id="doc-pagination" hidden>
             <button class="btn-ghost" id="doc-prev" type="button">上一页</button>
             <span id="doc-page" aria-live="polite"></span>
@@ -231,6 +256,7 @@
   </div>
   <p class="kb-filename" id="kb-filename"></p>
   <p class="account-summary" id="kb-doc-summary"></p>
+  <p class="kb-file-info" id="kb-file-info"></p>
   <p class="account-error" id="kb-doc-error"></p>
   <div class="kb-toolbar">
     <span>子片段用于检索，父片段提供上下文。</span>
@@ -252,6 +278,33 @@
     <span id="chunk-page" aria-live="polite"></span>
     <button class="btn-ghost" id="chunk-next" type="button">下一页</button>
   </div>
+</dialog>
+
+<dialog class="account-dialog kb-dialog" id="retrieval-dialog" aria-labelledby="retrieval-title">
+  <div class="account-heading">
+    <h2 id="retrieval-title">检索测试</h2>
+    <button class="btn-ghost" id="retrieval-close" type="button">关闭</button>
+  </div>
+  <p class="account-hint">查看知识库命中的片段，不生成回答。检索仍会使用向量化和重排序服务。</p>
+  <form id="retrieval-form">
+    <div class="field">
+      <label for="retrieval-query">测试问题</label>
+      <textarea id="retrieval-query" rows="3" maxlength="2000" required placeholder="输入要在资料中查找的问题"></textarea>
+    </div>
+    <div class="retrieval-options">
+      <label for="retrieval-top-k">返回条数
+        <input id="retrieval-top-k" type="number" min="1" max="20" value="5" required>
+      </label>
+      <label class="retrieval-check"><input id="retrieval-compare" type="checkbox">对比三种检索方案（会增加检索请求）</label>
+    </div>
+    <div class="account-actions">
+      <button class="btn-solid" id="retrieval-submit" type="submit">开始检索</button>
+    </div>
+  </form>
+  <p class="account-error" id="retrieval-error" role="alert"></p>
+  <p class="kb-notice" id="retrieval-status" role="status"></p>
+  <button class="btn-ghost" id="retrieval-retry" type="button" hidden>重试上次检索</button>
+  <div id="retrieval-results" aria-busy="false"></div>
 </dialog>
 
 <div class="toast" id="toast"></div>

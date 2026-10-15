@@ -14,7 +14,7 @@ RAG 主链 —— 把所有零件串成一条完整的问答流水线
    ↓
 ④ 重排序（精排取 Top5）
    ↓
-⑤ 相关性阈值检查 ──分数太低──→ 直接回"知识库中没找到"，不让模型瞎编
+⑤ 相关性阈值检查 ──分数太低──→ 使用通用知识提示词生成回答
    ↓ 通过
 ⑥ 组装提示词（资料编号 + 历史对话 + 问题）
    ↓
@@ -37,6 +37,7 @@ RAG 主链 —— 把所有零件串成一条完整的问答流水线
 
 from __future__ import annotations
 
+import re
 import time
 from typing import Any, AsyncGenerator, Optional
 
@@ -44,11 +45,14 @@ from app.core.config import settings
 from app.core.logging import logger
 from app.rag.prompt import (
     build_context,
+    build_general_prompt,
     build_rag_prompt,
+    format_history,
 )
 from app.rag.retriever import HybridRetriever, get_retriever
 from app.rag.rewriter import QueryRewriter, get_rewriter
 from app.rag.semantic_cache import get_semantic_cache
+from app.rag.citations import CitationFilter, validate_answer
 
 
 class RAGChain:
@@ -113,17 +117,18 @@ class RAGChain:
 
         return self._llm_cache[cache_key]
 
-    def _get_prompt_chain(self, streaming: bool = False):
+    def _get_prompt_chain(self, streaming: bool = False, knowledge_source: str = "knowledge_base"):
         """构建 LCEL 链：提示词 → 模型"""
         from langchain_core.output_parsers import StrOutputParser
 
         llm = self._get_llm(streaming=streaming)
+        prompt = build_general_prompt() if knowledge_source == "general" else build_rag_prompt()
 
         if streaming:
             # 流式链不用 StrOutputParser（它会缓冲全部内容才输出，
             # 那样就失去流式意义了）。直接返回模型的流。
-            return build_rag_prompt() | llm
-        return build_rag_prompt() | llm | StrOutputParser()
+            return prompt | llm
+        return prompt | llm | StrOutputParser()
 
     # ==============================================================
     # 准备阶段（两条路径共用）
@@ -152,8 +157,22 @@ class RAGChain:
         timings: dict[str, float] = {}
         history = history or []
 
+        # 模型身份属于系统配置，不需要检索或让模型猜测自己的身份。
+        direct_answer = _model_identity_answer(question)
+        if direct_answer is not None:
+            return {
+                "cached": None, "direct_answer": direct_answer,
+                "knowledge_source": "system", "no_answer": False,
+                "search_query": question, "chunks": [], "prompt_input": None,
+                "rewrite": None, "top_score": 0.0,
+                "cache_allowed": False, "timings": timings,
+            }
+
+        # 多轮对话的答案依赖历史，不使用仅以问题文本匹配的共享缓存。
+        cache_allowed = self.enable_cache and use_cache and not history
+
         # ---------------- ① 语义缓存 ----------------
-        if self.enable_cache and use_cache:
+        if cache_allowed:
             t0 = time.perf_counter()
             cached = get_semantic_cache().lookup(question)
             timings["cache_ms"] = round((time.perf_counter() - t0) * 1000, 1)
@@ -180,7 +199,11 @@ class RAGChain:
 
         # ---------------- ③④ 混合检索 + 重排序 ----------------
         t0 = time.perf_counter()
-        chunks = self.retriever.retrieve(search_query, top_k=top_k)
+        try:
+            chunks = self.retriever.retrieve(search_query, top_k=top_k)
+        except Exception as e:
+            logger.warning(f"资料检索不可用，切换为通用知识回答 | {type(e).__name__}")
+            chunks = []
         timings["retrieval_ms"] = round((time.perf_counter() - t0) * 1000, 1)
 
         # ---------------- ⑤ 相关性阈值检查 ----------------
@@ -211,11 +234,15 @@ class RAGChain:
             if chunks
             else "知识库没有检索到与问题直接相关的资料。请基于通用知识回答，并明确标注依据。"
         )
-        prompt_input = {"context": context, "question": question}
+        prompt_input = {
+            "context": context, "question": search_query,
+            "history": format_history(history),
+        }
         timings["prompt_ms"] = round((time.perf_counter() - t0) * 1000, 1)
 
         return {
             "cached": None,
+            "cache_allowed": cache_allowed,
             "no_answer": knowledge_source == "general",
             "knowledge_source": knowledge_source,
             "search_query": search_query,
@@ -291,11 +318,14 @@ class RAGChain:
         citations: list[dict[str, Any]] = []
 
         for i, chunk in enumerate(chunks, start=1):
-            content = (chunk.get("content") or "").strip()
-            if not content:
+            context = (chunk.get("parent_content") or chunk.get("content") or "").strip()
+            content = (chunk.get("content") or "").strip() or context
+            if not context:
                 continue
 
-            score = chunk.get("rerank_score") or chunk.get("score") or 0.0
+            score = chunk.get("rerank_score")
+            if score is None:
+                score = chunk.get("score") or 0.0
 
             citations.append(
                 {
@@ -310,6 +340,14 @@ class RAGChain:
             )
 
         return citations
+
+    @classmethod
+    def _validate_answer(
+        cls, answer: str, chunks: list[dict[str, Any]], knowledge_source: str
+    ) -> tuple[str, list[dict[str, Any]], str]:
+        """只接受已提供给模型且正文实际使用的资料编号。"""
+        citations = cls.build_citations(chunks[:settings.MAX_CONTEXT_CHUNKS])
+        return validate_answer(answer, citations, knowledge_source)
 
     # ==============================================================
     # 非流式问答（测试和调试用）
@@ -326,13 +364,25 @@ class RAGChain:
         ctx = self._prepare(question, history, use_cache, top_k)
         timings = ctx["timings"]
 
+        if ctx.get("direct_answer") is not None:
+            timings["total_ms"] = round((time.perf_counter() - t_start) * 1000, 1)
+            return {
+                "answer": ctx["direct_answer"], "citations": [], "cache_hit": False,
+                "search_query": question, "rewritten": None, "chunks": [],
+                "timings": timings, "top_score": 0.0,
+                "knowledge_source": "system", "no_answer": False,
+            }
+
         # ---- 命中缓存 ----
         if ctx.get("cached"):
             cached = ctx["cached"]
+            answer, citations, source = validate_answer(
+                cached["answer"], cached.get("citations", []), cached.get("knowledge_source", "knowledge_base")
+            )
             timings["total_ms"] = round((time.perf_counter() - t_start) * 1000, 1)
             return {
-                "answer": cached["answer"],
-                "citations": cached.get("citations", []),
+                "answer": answer,
+                "citations": citations,
                 "cache_hit": True,
                 "cache_similarity": cached.get("cache_similarity"),
                 "matched_question": cached.get("cache_matched_question"),
@@ -341,20 +391,23 @@ class RAGChain:
                 "chunks": [],
                 "timings": timings,
                 "top_score": cached.get("cache_similarity", 1.0),
-                "knowledge_source": cached.get("knowledge_source", "knowledge_base"),
+                "knowledge_source": source,
+                "no_answer": source == "general",
             }
 
         # ---- 调模型生成 ----
         t0 = time.perf_counter()
-        chain = self._get_prompt_chain(streaming=False)
+        chain = self._get_prompt_chain(streaming=False, knowledge_source=ctx["knowledge_source"])
         answer = chain.invoke(ctx["prompt_input"])
         timings["generation_ms"] = round((time.perf_counter() - t0) * 1000, 1)
 
-        citations = self.build_citations(ctx["chunks"])
+        answer, citations, knowledge_source = self._validate_answer(answer, ctx["chunks"], ctx["knowledge_source"])
+        ctx["knowledge_source"] = knowledge_source
+        ctx["no_answer"] = knowledge_source == "general"
         timings["total_ms"] = round((time.perf_counter() - t_start) * 1000, 1)
 
         # ---- 写入语义缓存 ----
-        if self.enable_cache and use_cache:
+        if ctx["cache_allowed"]:
             try:
                 get_semantic_cache().store(
                     question, answer, citations,
@@ -410,9 +463,28 @@ class RAGChain:
                 self._prepare, question, history, use_cache, top_k
             )
 
+            if ctx.get("direct_answer") is not None:
+                yield {"event": "status", "data": {"stage": "system_info", "message": "正在读取模型配置"}}
+                for piece in _chunk_text(ctx["direct_answer"], 12):
+                    yield {"event": "token", "data": {"text": piece}}
+                yield {"event": "citations", "data": []}
+                yield {
+                    "event": "done",
+                    "data": {
+                        "cache_hit": False, "knowledge_source": "system", "no_answer": False,
+                        "search_query": question, "top_score": 0.0,
+                        "latency_ms": round((time.perf_counter() - t_start) * 1000),
+                        "timings": {"total_ms": round((time.perf_counter() - t_start) * 1000, 1)},
+                    },
+                }
+                return
+
             # ---- 命中缓存：直接返回 ----
             if ctx.get("cached"):
                 cached = ctx["cached"]
+                answer, citations, source = validate_answer(
+                    cached["answer"], cached.get("citations", []), cached.get("knowledge_source", "knowledge_base")
+                )
                 yield {
                     "event": "status",
                     "data": {
@@ -421,19 +493,18 @@ class RAGChain:
                     },
                 }
                 # 虽然是缓存，也按"逐字"发送，保持体验一致
-                for piece in _chunk_text(cached["answer"], 12):
+                for piece in _chunk_text(answer, 12):
                     yield {"event": "token", "data": {"text": piece}}
                     await asyncio.sleep(0.008)
 
-                citations = cached.get("citations", [])
                 yield {"event": "citations", "data": citations}
                 yield {
                     "event": "done",
                     "data": {
                         "cache_hit": True,
                         "cache_similarity": cached.get("cache_similarity"),
-                        "knowledge_source": cached.get("knowledge_source", "knowledge_base"),
-                        "no_answer": cached.get("knowledge_source") == "general",
+                        "knowledge_source": source,
+                        "no_answer": source == "general",
                         "matched_question": cached.get("cache_matched_question"),
                         "latency_ms": round((time.perf_counter() - t_start) * 1000),
                         "timings": ctx["timings"],
@@ -484,8 +555,10 @@ class RAGChain:
             # ---------------- 流式生成 ----------------
             t_gen = time.perf_counter()
             full_answer: list[str] = []
+            candidates = self.build_citations(chunks[:settings.MAX_CONTEXT_CHUNKS]) if ctx["knowledge_source"] == "knowledge_base" else []
+            citation_filter = CitationFilter(c["index"] for c in candidates)
 
-            chain = self._get_prompt_chain(streaming=True)
+            chain = self._get_prompt_chain(streaming=True, knowledge_source=ctx["knowledge_source"])
 
             # astream 逐个产出模型输出的片段
             async for piece in chain.astream(ctx["prompt_input"]):
@@ -513,8 +586,15 @@ class RAGChain:
                 if not text:
                     continue
 
-                full_answer.append(text)
-                yield {"event": "token", "data": {"text": text}}
+                text = citation_filter.feed(text)
+                if text:
+                    full_answer.append(text)
+                    yield {"event": "token", "data": {"text": text}}
+
+            tail = citation_filter.feed("", final=True)
+            if tail:
+                full_answer.append(tail)
+                yield {"event": "token", "data": {"text": tail}}
 
             answer = "".join(full_answer)
             timings = dict(ctx["timings"])
@@ -522,11 +602,14 @@ class RAGChain:
             timings["total_ms"] = round((time.perf_counter() - t_start) * 1000, 1)
 
             # ---------------- 引用溯源 ----------------
-            citations = self.build_citations(chunks)
+            citations = [c for c in candidates if c["index"] in citation_filter.used]
+            knowledge_source = "knowledge_base" if citations else "general"
+            ctx["knowledge_source"] = knowledge_source
+            ctx["no_answer"] = knowledge_source == "general"
             yield {"event": "citations", "data": citations}
 
             # ---------------- 写入语义缓存 ----------------
-            if self.enable_cache and use_cache and answer:
+            if ctx["cache_allowed"] and answer:
                 try:
                     await asyncio.to_thread(
                         get_semantic_cache().store, question, answer, citations,
@@ -553,7 +636,7 @@ class RAGChain:
             yield {
                 "event": "error",
                 "data": {
-                    "message": "生成回答时出错了，请稍后重试",
+                    "message": _generation_error_message(e),
                     "detail": f"{type(e).__name__}: {str(e)[:200]}",
                 },
             }
@@ -562,6 +645,30 @@ class RAGChain:
 # ==================================================================
 # 辅助函数
 # ==================================================================
+def _model_identity_answer(question: str) -> Optional[str]:
+    """只识别询问当前助手模型身份的完整句式。"""
+    normalized = re.sub(r"[\s?？。.!！]", "", question)
+    pattern = (
+        r"(?:请问|请告诉我)?(?:你|您|这个系统|这个助手)(?:现在)?"
+        r"(?:(?:用的|使用的|采用的|调用的|的|底层)?模型(?:名称|名字)?"
+        r"(?:是什么|是哪个|是哪种|叫什么|叫什么名字)"
+        r"|(?:是|用的|使用的|使用|采用|调用|基于)(?:什么|哪个|哪种)"
+        r"(?:大语言|语言|大|AI)?模型)(?:呢|呀|啊|吗)?"
+    )
+    if re.fullmatch(pattern, normalized, flags=re.IGNORECASE):
+        return f"当前配置的对话模型是 **{settings.LLM_MODEL}**，由阿里云百炼（DashScope）提供。"
+    return None
+
+
+def _generation_error_message(error: Exception) -> str:
+    """网络连接失败时明确说明原因，避免误报为知识库没有答案。"""
+    from requests.exceptions import ConnectionError, Timeout
+
+    if isinstance(error, (ConnectionError, Timeout)):
+        return "无法连接模型服务，请检查后端的联网权限、网络或代理设置后重试。"
+    return "生成回答时出错了，请稍后重试"
+
+
 def _chunk_text(text: str, size: int = 12) -> list[str]:
     """
     把文本切成小块，用于模拟流式输出。

@@ -117,23 +117,30 @@ async function api(path, options = {}) {
  * 第一步必须先把 & < > 转义掉，再处理 Markdown 语法。
  * 反过来的话，先处理语法就会把用户输入的 <script> 当成正常标签留下来。
  */
-function md(text) {
+function md(text, citations = []) {
   let html = esc(text);
+  const protectedParts = [];
+  let prefix = '\u0000MARKDOWN';
+  while (html.includes(prefix)) prefix += '_';
+  const protect = value => {
+    const token = prefix + protectedParts.length + '\u0000';
+    protectedParts.push({ token, value });
+    return token;
+  };
 
-  // 代码块（``` 包裹）
-  html = html.replace(/```([\s\S]*?)```/g, '<pre><code>$1</code></pre>');
+  // 代码和数字链接标签先隔离，避免被后面的引用 / 列表替换处理。
+  html = html.replace(/(`{3,}|~{3,})([\s\S]*?)\1/g, (_, fence, content) => protect('<pre><code>' + content + '</code></pre>'));
+  html = html.replace(/(`+)([^\n]*?)\1/g, (_, ticks, content) => protect('<code>' + content + '</code>'));
+  html = html.replace(/\[[^\]\n]*\]\([^\n]*?\)|\[[^\]\n]*\]\[(?![0-9]+\])[^\]\n]*\]|\[[0-9]+\]:[^\n]*/g, match => protect(match));
   // 粗体
   html = html.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
-  // 行内代码
-  html = html.replace(/`([^`]+)`/g, '<code>$1</code>');
   // 引用标注 [1] → 可点击的小标签
   // data-cite 里存的是引用编号，点它就能跳到下面第 N 张引用卡片。
   // 用 data- 属性而不是把编号写进 onclick，是因为回答里可能有用户
   // 自己输入的 [1]，走属性 + 事件委托更干净，也不会拼出可执行的代码。
-  html = html.replace(
-    /\[(\d+)\]/g,
-    '<span class="cite-ref" data-cite="$1" title="点击查看第 $1 条出处">[$1]</span>'
-  );
+  const valid = new Set((citations || []).map(c => Number(c.index)));
+  html = html.replace(/(?<!\\)\[([0-9]+)\]/g, (match, index) => valid.has(Number(index))
+    ? `<span class="cite-ref" data-cite="${Number(index)}" title="点击查看第 ${Number(index)} 条出处">${match}</span>` : match);
   // 无序列表
   html = html.replace(/^[-•]\s+(.+)$/gm, '<li>$1</li>');
   html = html.replace(/(<li>[\s\S]*?<\/li>)/g, '<ul>$1</ul>');
@@ -144,10 +151,11 @@ function md(text) {
     p = p.trim();
     if (!p) return '';
     // 已经是块级元素的，不要再包 <p>
-    if (p.startsWith('<ul>') || p.startsWith('<pre')) return p;
+    if (p.startsWith('<ul>') || p.startsWith('<pre') || protectedParts.some(part => part.value.startsWith('<pre>') && p.startsWith(part.token))) return p;
     return '<p>' + p.replace(/\n/g, '<br>') + '</p>';
   }).join('');
 
+  for (const part of protectedParts) html = html.replaceAll(part.token, part.value);
   return html;
 }
 
@@ -389,8 +397,8 @@ async function enterApp() {
   // 后端的 /api/kb/* 接口会直接返回 403。
   $('kb-section').style.display = isAdmin ? 'flex' : 'none';
 
-  await loadSessions();
   newChat(false);          // 默认停在一个空白的新对话上
+  await loadSessions();
 
   if (isAdmin) {
     loadStats();
@@ -653,7 +661,7 @@ function renderHistoryMessage(m, prevQuestion = '') {
 
   const answerEl = wrap.querySelector('.answer');
   answerEl.style.display = 'block';
-  answerEl.innerHTML = md(m.content);
+  answerEl.innerHTML = md(m.content, m.citations);
 
   if (m.citations && m.citations.length) {
     renderCitations(wrap.querySelector('.citations'), m.citations);
@@ -661,6 +669,8 @@ function renderHistoryMessage(m, prevQuestion = '') {
 
   // 历史消息底部同样显示当时的耗时和缓存情况，外加操作按钮
   const tags = [];
+  if (m.knowledge_source === 'general') tags.push('<span class="meta-tag">💡 通用知识回答</span>');
+  if (m.knowledge_source === 'system') tags.push('<span class="meta-tag">⚙️ 系统配置</span>');
   if (m.cache_hit) tags.push('<span class="meta-tag cache">⚡ 缓存</span>');
   if (m.latency_ms) tags.push(`<span class="meta-tag">耗时 ${(m.latency_ms / 1000).toFixed(2)} 秒</span>`);
 
@@ -853,7 +863,7 @@ async function streamAnswer(wrap, question, { regenerate = false } = {}) {
               answerEl.style.display = 'block';
             }
             answerText += payload.text;
-            answerEl.innerHTML = md(answerText) + '<span class="cursor"></span>';
+            answerEl.innerHTML = md(answerText, citations) + '<span class="cursor"></span>';
             scrollBottom();
             break;
 
@@ -912,7 +922,7 @@ async function streamAnswer(wrap, question, { regenerate = false } = {}) {
         stopped ? '（已停止，这次的回答没有生成出来）' : '（没有生成任何内容）'
       }</p>`;
     } else {
-      answerEl.innerHTML = md(answerText);
+      answerEl.innerHTML = md(answerText, citations);
     }
 
     const tags = [];
@@ -924,6 +934,9 @@ async function streamAnswer(wrap, question, { regenerate = false } = {}) {
     if (donePayload) {
       if (donePayload.knowledge_source === 'general') {
         tags.push('<span class="meta-tag">💡 通用知识回答</span>');
+      }
+      if (donePayload.knowledge_source === 'system') {
+        tags.push('<span class="meta-tag">⚙️ 系统配置</span>');
       }
       if (donePayload.cache_hit) {
         const sim = (donePayload.cache_similarity || 1).toFixed(2);
@@ -1085,11 +1098,14 @@ function jumpToCitation(refEl) {
 
 async function loadStats() {
   if (!state.user || state.user.role !== 'admin') return;
+  const token = state.token;
+  const request = ++statsRequest;
   try {
     const [s, health] = await Promise.all([
       api('/api/kb/stats'),
       api('/api/health'),
     ]);
+    if (token !== state.token || request !== statsRequest) return;
     $('kb-stat').innerHTML =
       `<b>文档</b> ${s.documents.total} 份 &nbsp;·&nbsp; ` +
       `<b>片段</b> ${s.content.vector_chunks} 个<br>` +
@@ -1097,6 +1113,7 @@ async function loadStats() {
       `<b>模型</b> ${esc(health.llm_model)}<br>` +
       `<b>缓存命中率</b> ${esc(s.semantic_cache.hit_rate || '0%')}`;
   } catch (e) {
+    if (token !== state.token || request !== statsRequest) return;
     $('kb-stat').textContent = '统计加载失败：' + e.message;
   }
 }
@@ -1105,15 +1122,50 @@ const kbView = { doc: null, page: 1, pages: 0, loading: false, rebuilding: false
 let docsPage = 1;
 let docsPages = 0;
 let docsRequest = 0;
+let statsRequest = 0;
+let docFilters = { keyword: '', status: '' };
+const uploads = { items: [], busy: false, generation: 0 };
+const retrievalView = { busy: false, request: 0, abort: null, last: null };
 const documentStatus = { indexed: '已索引', parsing: '处理中', pending: '待处理', failed: '处理失败' };
 
+function fileSize(bytes) {
+  if (!Number.isFinite(bytes)) return '大小未知';
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function fileDate(value) {
+  if (!value) return '时间未知';
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? '时间未知' : date.toLocaleString('zh-CN');
+}
+
+function applyDocFilters() {
+  docFilters = { keyword: $('doc-keyword').value.trim(), status: $('doc-status').value };
+  return loadDocs(1);
+}
+
 function resetKnowledgeView() {
+  resetRetrieval();
+  $('retrieval-form').reset();
+  if ($('retrieval-dialog').open) $('retrieval-dialog').close();
   kbView.request++;
   kbView.doc = null;
   kbView.loading = false;
   kbView.rebuilding = false;
   docsRequest++;
+  statsRequest++;
   docsPage = 1;
+  docsPages = 0;
+  docFilters = { keyword: '', status: '' };
+  $('doc-filter').reset();
+  $('doc-result-summary').textContent = '';
+  $('doc-list').setAttribute('aria-busy', 'false');
+  uploads.generation++;
+  uploads.items = [];
+  uploads.busy = false;
+  renderUploads();
   if ($('kb-dialog').open) $('kb-dialog').close();
   $('chunk-list').replaceChildren();
   $('doc-list').replaceChildren();
@@ -1124,15 +1176,21 @@ async function loadDocs(page = docsPage) {
   if (!state.user || state.user.role !== 'admin') return;
   const request = ++docsRequest;
   const token = state.token;
+  $('doc-list').setAttribute('aria-busy', 'true');
+  $('doc-result-summary').textContent = '正在加载文档…';
   $('doc-prev').disabled = true;
   $('doc-next').disabled = true;
   try {
-    const data = await api(`/api/kb/documents?page=${page}&page_size=20`);
+    const params = new URLSearchParams({ page, page_size: 20 });
+    if (docFilters.keyword) params.set('keyword', docFilters.keyword);
+    if (docFilters.status) params.set('status', docFilters.status);
+    const data = await api('/api/kb/documents?' + params);
     if (request !== docsRequest || token !== state.token) return;
     // 删除最后一页的最后一项后，回到有效页。
     if (page > Math.max(1, data.total_pages)) return loadDocs(Math.max(1, data.total_pages));
     docsPage = data.page;
     docsPages = data.total_pages;
+    $('doc-result-summary').textContent = `共 ${data.total} 份文档${docFilters.keyword || docFilters.status ? '（已筛选）' : ''}`;
     $('doc-pagination').hidden = docsPages <= 1;
     $('doc-page').textContent = `${docsPage} / ${Math.max(1, docsPages)}`;
     $('doc-prev').disabled = docsPage <= 1;
@@ -1140,7 +1198,7 @@ async function loadDocs(page = docsPage) {
     const list = $('doc-list');
 
     if (!data.items.length) {
-      list.innerHTML = '<div class="s-empty" style="padding:14px">还没有上传任何资料</div>';
+      list.innerHTML = `<div class="s-empty" style="padding:14px">${docFilters.keyword || docFilters.status ? '没有符合条件的文档，请调整搜索或状态筛选' : '还没有上传任何资料'}</div>`;
       return;
     }
 
@@ -1152,6 +1210,7 @@ async function loadDocs(page = docsPage) {
           <span aria-hidden="true">${icon}</span>
           <span class="name">${esc(d.file_name)}</span>
           <span class="doc-count">${d.chunk_count}段</span>
+          <span class="doc-meta">${esc(documentStatus[d.status] || d.status)} · ${esc(fileSize(d.file_size))} · ${esc((d.file_type || '').toUpperCase())}</span>
         </button>
         <button class="del" type="button" data-id="${d.id}" data-name="${esc(d.file_name)}" aria-label="删除 ${esc(d.file_name)}">×</button>
       </div>`;
@@ -1165,9 +1224,13 @@ async function loadDocs(page = docsPage) {
     });
   } catch (e) {
     if (request !== docsRequest || token !== state.token) return;
+    $('doc-result-summary').textContent = '文档加载失败';
+    $('doc-pagination').hidden = true;
     $('doc-list').innerHTML =
       `<div class="s-empty" style="color:var(--danger)">加载失败：${esc(e.message)}</div><button class="btn-ghost" id="docs-retry" type="button">重试</button>`;
     $('docs-retry').onclick = () => loadDocs(page);
+  } finally {
+    if (request === docsRequest && token === state.token) $('doc-list').setAttribute('aria-busy', 'false');
   }
 }
 
@@ -1188,6 +1251,8 @@ function renderDocumentSummary() {
   $('kb-filename').textContent = d.file_name;
   $('kb-doc-summary').textContent = `${documentStatus[d.status] || d.status} · ${d.chunk_count} 个子片段 · ${d.parent_chunk_count} 个父片段 · ${d.char_count} 字`;
   $('kb-doc-error').textContent = d.error_msg || '';
+  $('kb-file-info').textContent = `${(d.file_type || '').toUpperCase()} · ${fileSize(d.file_size)} · 上传于 ${fileDate(d.created_at)}` +
+    (d.description ? `\n备注：${d.description}` : '');
 }
 
 function openDocument(doc) {
@@ -1219,7 +1284,7 @@ async function loadChunks(page = kbView.page) {
     const data = await api(`/api/kb/documents/${id}/chunks?page=${page}&page_size=20`);
     if (!current()) return;
     if (page > Math.max(1, data.total_pages)) return loadChunks(Math.max(1, data.total_pages));
-    kbView.doc = data.document;
+    kbView.doc = { ...kbView.doc, ...data.document };
     kbView.page = data.page;
     kbView.pages = data.total_pages;
     renderDocumentSummary();
@@ -1287,21 +1352,190 @@ async function removeDoc(id, name) {
   }
 }
 
-async function uploadFiles(files) {
-  if (!files.length) return;
-  for (const f of files) {
+function renderUploads() {
+  $('upload-feedback').hidden = uploads.items.length === 0;
+  $('upload-area').disabled = uploads.busy;
+  $('file-input').disabled = uploads.busy;
+  $('upload-clear').disabled = uploads.busy;
+  const success = uploads.items.filter(i => i.status === 'success').length;
+  const failed = uploads.items.filter(i => i.status === 'failed' || i.status === 'invalid').length;
+  const done = success + failed;
+  $('upload-summary').textContent = uploads.busy
+    ? `正在处理 ${Math.min(done + 1, uploads.items.length)} / ${uploads.items.length} 个文件，请等待解析和入库完成…`
+    : `处理完成：${success} 个成功，${failed} 个失败`;
+  const labels = { pending: '等待处理', processing: '上传并解析中…', success: '入库成功', failed: '上传或处理失败', invalid: '文件不符合要求' };
+  $('upload-results').innerHTML = uploads.items.map((item, index) =>
+    `<div class="upload-result ${item.status === 'invalid' ? 'failed' : item.status}">
+      <span>${esc(item.file.name)} · ${esc(fileSize(item.file.size))}</span>
+      <small>${esc(labels[item.status])}${item.message ? '：' + esc(item.message) : ''}</small>
+      ${item.status === 'failed' ? `<button class="btn-ghost" type="button" data-retry="${index}" ${uploads.busy ? 'disabled' : ''}>重新上传</button>` : ''}
+    </div>`).join('');
+  $('upload-results').querySelectorAll('[data-retry]').forEach(button => {
+    button.onclick = () => {
+      if (uploads.busy) return;
+      const item = uploads.items[Number(button.dataset.retry)];
+      if (!confirm(`重新上传「${item.file.name}」？\n如果上次断网，服务端可能已入库，请先查看文档列表，避免重复上传。`)) return;
+      processUploads([item]);
+    };
+  });
+}
+
+async function processUploads(items) {
+  if (uploads.busy || state.user?.role !== 'admin') return;
+  const generation = uploads.generation;
+  const token = state.token;
+  const current = () => generation === uploads.generation && token === state.token;
+  uploads.busy = true;
+  for (const item of items) {
+    if (!current()) return;
+    if (item.status === 'invalid') continue;
+    item.status = 'processing';
+    item.message = '';
+    renderUploads();
     const form = new FormData();
-    form.append('file', f);
-    toast(`正在上传解析「${f.name}」…`, 60000);
+    form.append('file', item.file);
     try {
       const r = await api('/api/kb/documents/upload', { method: 'POST', body: form });
-      toast(`✅ 「${f.name}」入库成功：${r.chunk_count} 个片段`, 3200);
+      if (!current()) return;
+      item.status = 'success';
+      item.message = `${r.chunk_count} 个片段`;
     } catch (e) {
-      toast(`❌ 「${f.name}」失败：${e.message}`, 5200);
+      if (!current()) return;
+      item.status = 'failed';
+      item.message = e.message;
+    }
+    renderUploads();
+  }
+  if (!current()) return;
+  uploads.busy = false;
+  renderUploads();
+  await Promise.all([loadDocs(), loadStats()]);
+}
+
+async function uploadFiles(files) {
+  // FileList 会随 input.value 清空而变化；先复制，保留批量选择的全部文件。
+  const selected = Array.from(files || []);
+  if (!selected.length || state.user?.role !== 'admin') return;
+  if (uploads.busy) { toast('请等待当前上传完成'); return; }
+  uploads.items = selected.map(file => {
+    const supported = /\.(pdf|docx?|xlsx?|csv|md|txt|html?)$/i.test(file.name);
+    const message = !supported ? '不支持此文件格式' : !file.size ? '文件是空的' : '';
+    return { file, status: message ? 'invalid' : 'pending', message };
+  });
+  renderUploads();
+  await processUploads(uploads.items);
+}
+
+function resetRetrieval() {
+  retrievalView.request++;
+  retrievalView.abort?.abort();
+  retrievalView.abort = null;
+  retrievalView.busy = false;
+  retrievalView.last = null;
+  $('retrieval-submit').disabled = false;
+  $('retrieval-submit').textContent = '开始检索';
+  $('retrieval-results').replaceChildren();
+  $('retrieval-results').setAttribute('aria-busy', 'false');
+  $('retrieval-error').textContent = '';
+  $('retrieval-status').textContent = '';
+  $('retrieval-retry').hidden = true;
+}
+
+function openRetrieval() {
+  if (state.user?.role !== 'admin') return;
+  resetRetrieval();
+  $('retrieval-dialog').showModal();
+  $('retrieval-query').focus();
+}
+
+function retrievalScore(value) {
+  return typeof value === 'number' && Number.isFinite(value) ? value.toFixed(4) : '未提供';
+}
+
+function renderRetrieval(data, compared) {
+  const scoreNames = { vector_score: '向量分数', bm25_score: '关键词分数', rrf_score: '融合分数', rerank_score: '重排序分数' };
+  const timingNames = { vector_ms: '向量检索', bm25_ms: '关键词检索', fusion_ms: '融合', rerank_ms: '重排序', total_ms: '总耗时' };
+  const timings = Object.entries(timingNames).filter(([key]) => Number.isFinite(data.timings?.[key]))
+    .map(([key, label]) => `${label} ${data.timings[key]} ms`).join(' · ');
+  const results = data.results || [];
+  let html = `<p class="kb-file-info">测试问题：${esc(data.query)}</p>` +
+    (timings ? `<p class="account-hint">${esc(timings)}</p>` : '') +
+    '<p class="account-hint">不同类型的分数量纲不同，请分别比较。命中片段不代表它一定能回答问题。</p>';
+  html += results.length ? results.map(result => {
+    const scores = Object.entries(scoreNames).filter(([key]) => result[key] != null)
+      .map(([key, label]) => `<span>${label} ${retrievalScore(result[key])}</span>`).join('');
+    const sources = (result.sources || []).map(source => ({ vector: '向量', bm25: '关键词' }[source] || source)).join('、');
+    return `<article class="chunk-card">
+      <div class="chunk-meta">第 ${esc(result.rank)} 条 · ${esc(result.file_name || '来源未知')}${result.page != null ? ' · 页码 ' + esc(result.page) : ''}${result.sheet_name ? ' · 工作表 ' + esc(result.sheet_name) : ''}</div>
+      ${sources ? `<p class="account-hint">召回来源：${esc(sources)}${result.hit_both ? '（两路均命中）' : ''}</p>` : ''}
+      <div class="retrieval-scores">${scores || '<span>未提供分数</span>'}</div>
+      <div class="chunk-content">${esc(result.content || '')}</div>
+      ${result.parent_content ? `<details><summary>展开父片段上下文</summary><div class="chunk-content">${esc(result.parent_content)}</div></details>` : ''}
+    </article>`;
+  }).join('') : '<p class="s-empty">没有命中片段。可以换一种问法，或检查文档是否已完成索引。</p>';
+  if (compared && data.comparison) {
+    const names = { vector_only: '纯向量检索', hybrid: '向量 + 关键词', hybrid_rerank: '混合检索 + 重排序' };
+    const types = { vector: '向量', bm25: '关键词', rerank: '重排序' };
+    html += '<section class="retrieval-comparison"><h3>三种方案对比</h3><p class="account-hint">对照排序和片段内容；不同方案的分数不能直接比较大小。</p>';
+    for (const [key, name] of Object.entries(names)) {
+      const items = data.comparison[key] || [];
+      html += `<h3>${name}</h3>` + (items.length ? '<ol>' + items.map(item =>
+        `<li><b>${esc(item.file_name || '来源未知')}</b> · ${esc(types[item.score_type] || '检索')}分数 ${retrievalScore(item.score)}<div class="chunk-content">${esc(item.content || '')}</div></li>`
+      ).join('') + '</ol>' : '<p class="account-hint">没有命中片段</p>');
+    }
+    html += '</section>';
+  }
+  $('retrieval-results').innerHTML = html;
+}
+
+async function runRetrieval(retry = false) {
+  if (retrievalView.busy || state.user?.role !== 'admin' || !$('retrieval-dialog').open) return;
+  const input = retry ? retrievalView.last : {
+    query: $('retrieval-query').value.trim(),
+    top_k: Number($('retrieval-top-k').value),
+    compare: $('retrieval-compare').checked,
+  };
+  if (!input) return;
+  if (!input.query || input.query.length > 2000 || !Number.isInteger(input.top_k) || input.top_k < 1 || input.top_k > 20) {
+    $('retrieval-error').textContent = '请输入 1～2000 个字符的问题，返回条数应为 1～20 的整数';
+    return;
+  }
+  const token = state.token;
+  const request = ++retrievalView.request;
+  const current = () => request === retrievalView.request && token === state.token && $('retrieval-dialog').open;
+  retrievalView.last = { ...input };
+  retrievalView.busy = true;
+  retrievalView.abort = new AbortController();
+  $('retrieval-submit').disabled = true;
+  $('retrieval-submit').textContent = '检索中…';
+  $('retrieval-error').textContent = '';
+  $('retrieval-retry').hidden = true;
+  $('retrieval-status').textContent = input.compare ? '正在检索并对比三种方案…' : '正在检索资料…';
+  $('retrieval-results').replaceChildren();
+  $('retrieval-results').setAttribute('aria-busy', 'true');
+  const form = new FormData();
+  form.append('query', input.query);
+  form.append('top_k', input.top_k);
+  form.append('compare', input.compare);
+  try {
+    const data = await api('/api/kb/search', { method: 'POST', body: form, signal: retrievalView.abort.signal });
+    if (!current()) return;
+    renderRetrieval(data, input.compare);
+    $('retrieval-status').textContent = `检索完成，命中 ${data.results?.length || 0} 条片段`;
+  } catch (error) {
+    if (!current() || error.name === 'AbortError') return;
+    $('retrieval-error').textContent = '检索失败：' + error.message;
+    $('retrieval-status').textContent = '';
+    $('retrieval-retry').hidden = false;
+  } finally {
+    if (current()) {
+      retrievalView.busy = false;
+      retrievalView.abort = null;
+      $('retrieval-submit').disabled = false;
+      $('retrieval-submit').textContent = '开始检索';
+      $('retrieval-results').setAttribute('aria-busy', 'false');
     }
   }
-  await loadDocs();
-  await loadStats();
 }
 
 // ==================================================================
@@ -1320,6 +1554,15 @@ $('account-dialog').oncancel = e => { if (accountBusy) e.preventDefault(); };
 $('account-dialog').onclose = clearAccountForms;
 $('doc-prev').onclick = () => loadDocs(docsPage - 1);
 $('doc-next').onclick = () => loadDocs(docsPage + 1);
+$('doc-filter').onsubmit = e => { e.preventDefault(); applyDocFilters(); };
+$('doc-status').onchange = applyDocFilters;
+$('doc-filter-clear').onclick = () => { $('doc-filter').reset(); applyDocFilters(); };
+$('upload-clear').onclick = () => { if (!uploads.busy) { uploads.items = []; renderUploads(); } };
+$('retrieval-open').onclick = openRetrieval;
+$('retrieval-close').onclick = () => $('retrieval-dialog').close();
+$('retrieval-dialog').onclose = resetRetrieval;
+$('retrieval-form').onsubmit = e => { e.preventDefault(); runRetrieval(); };
+$('retrieval-retry').onclick = () => runRetrieval(true);
 $('chunk-prev').onclick = () => loadChunks(kbView.page - 1);
 $('chunk-next').onclick = () => loadChunks(kbView.page + 1);
 $('kb-retry').onclick = () => loadChunks();
@@ -1444,7 +1687,7 @@ $('file-input').onchange = e => {
 
 {
   const ua = $('upload-area');
-  ua.ondragover = e => { e.preventDefault(); ua.classList.add('dragover'); };
+  ua.ondragover = e => { e.preventDefault(); if (!uploads.busy) ua.classList.add('dragover'); };
   ua.ondragleave = () => ua.classList.remove('dragover');
   ua.ondrop = e => {
     e.preventDefault();

@@ -24,6 +24,20 @@ from test_account import create_test_app as account_app
 class TestIndexService:
     def __init__(self):
         self.calls = 0
+        self.upload_names = []
+
+    async def ingest(self, db, file_content, original_name, uploaded_by, description=None):
+        self.upload_names.append(original_name)
+        await asyncio.sleep(.25)
+        if original_name == "失败重试.txt" and self.upload_names.count(original_name) == 1:
+            return IngestResult(success=False, error="模拟解析失败")
+        doc = Document(file_name=original_name, stored_name="test-upload.txt", file_type="txt",
+                       file_size=len(file_content), file_path="nonexistent-test-upload",
+                       status="indexed", chunk_count=1, parent_chunk_count=1,
+                       char_count=10, uploaded_by=uploaded_by, description=description)
+        db.add(doc)
+        await db.commit()
+        return IngestResult(success=True, doc_id=doc.id, file_name=original_name, chunk_count=1)
 
     async def reindex(self, db, doc):
         self.calls += 1
@@ -44,12 +58,37 @@ class TestIndexService:
         return IngestResult(success=True, doc_id=doc.id, chunk_count=2)
 
 
+class TestRetriever:
+    def __init__(self):
+        self.enable_rerank = True
+        self.enable_bm25 = True
+        self.calls = []
+
+    def retrieve(self, query, top_k=5, return_debug=False):
+        self.calls.append((query, top_k, self.enable_rerank, self.enable_bm25))
+        if query == "对比异常" and not self.enable_rerank:
+            raise RuntimeError("模拟对比异常")
+        results = [] if query == "没有资料" else [{
+            "file_name": "资料 <img src=x>.txt", "page": 3, "sheet_name": "工作表 <b>一</b>",
+            "content": f"第 {i + 1} 条：保养说明 <script>alert(1)</script>",
+            "parent_content": "父片段 <img src=x onerror=alert(1)>",
+            "score": .8, "source": "vector", "rrf_score": .03,
+            "rerank_score": 0.0 if self.enable_rerank else None,
+            "sources": ["vector", "bm25"] if self.enable_bm25 else ["vector"],
+            "hit_both": self.enable_bm25,
+        } for i in range(top_k)]
+        debug = {"vector_ms": 2, "bm25_ms": 1, "fusion_ms": .5, "rerank_ms": 3, "total_ms": 6.5}
+        return (results, debug) if return_debug else results
+
+
 def create_test_app():
     app = account_app()
     app.include_router(router)
     original_lifespan = app.router.lifespan_context
     service = TestIndexService()
     app.state.test_index = service
+    retriever = TestRetriever()
+    app.state.test_retriever = retriever
 
     @asynccontextmanager
     async def lifespan(app):
@@ -80,6 +119,7 @@ def create_test_app():
                 stack.enter_context(patch("app.rag.vectorstore.get_vector_store", return_value=Mock(count=lambda: 23)))
                 stack.enter_context(patch("app.rag.bm25.get_bm25_index", return_value=Mock(get_stats=lambda: {})))
                 stack.enter_context(patch("app.rag.semantic_cache.get_semantic_cache", return_value=Mock(get_stats=lambda: {})))
+                stack.enter_context(patch("app.rag.retriever.get_retriever", return_value=retriever))
                 yield
 
     app.router.lifespan_context = lifespan
@@ -118,6 +158,32 @@ class KnowledgeUiApiTests(unittest.TestCase):
         self.assertIn("<script>", first["items"][0]["parent_content"])
         self.assertEqual(first["items"][0]["page"], 3)
 
+    def test_document_filters_and_file_info(self):
+        result = self.client.get("/api/kb/documents", params={"keyword": "服饰", "status": "indexed"}, headers=self.admin).json()
+        self.assertEqual(result["total"], 1)
+        self.assertEqual(result["items"][0]["id"], 21)
+        self.assertEqual(result["items"][0]["file_size"], 100)
+        self.assertTrue(result["items"][0]["created_at"])
+        failed = self.client.get("/api/kb/documents?status=failed", headers=self.admin).json()
+        self.assertEqual([d["id"] for d in failed["items"]], [22])
+        empty = self.client.get("/api/kb/documents?keyword=不存在", headers=self.admin).json()
+        self.assertEqual((empty["total"], empty["items"]), (0, []))
+
+    def test_upload_validation_and_retry(self):
+        for name, content, code in [("wrong.exe", b"x", 40041), ("empty.txt", b"", 40042)]:
+            response = self.client.post("/api/kb/documents/upload", files={"file": (name, content)}, headers=self.admin)
+            self.assertEqual(response.json()["code"], code)
+        self.assertEqual(self.app.state.test_index.upload_names, [])
+        first = self.client.post("/api/kb/documents/upload", files={"file": ("失败重试.txt", b"content")}, headers=self.admin)
+        self.assertEqual(first.json()["code"], 40044)
+        second = self.client.post("/api/kb/documents/upload", files={"file": ("失败重试.txt", b"content")}, headers=self.admin)
+        self.assertEqual(second.status_code, 201)
+        result = self.client.get("/api/kb/documents?keyword=失败重试", headers=self.admin).json()
+        self.assertEqual(result["total"], 1)
+        self.assertEqual(result["items"][0]["file_size"], 7)
+        forbidden = self.client.post("/api/kb/documents/upload", files={"file": ("forbidden.txt", b"x")}, headers=self.user)
+        self.assertEqual(forbidden.status_code, 403)
+
     def test_empty_failed_missing_and_invalid_page(self):
         empty = self.client.get("/api/kb/documents/1/chunks", headers=self.admin).json()
         failed = self.client.get("/api/kb/documents/22/chunks", headers=self.admin).json()
@@ -148,6 +214,36 @@ class KnowledgeUiApiTests(unittest.TestCase):
         self.assertEqual(result.json()["code"], 40045)
         self.assertIn("原始文件不存在", result.json()["message"])
         self.assertEqual(self.client.post("/api/kb/documents/999/reindex", headers=self.admin).status_code, 404)
+
+    def test_search_results_and_comparison_preserve_configuration(self):
+        result = self.client.post("/api/kb/search", data={"query": " 保养 ", "top_k": 2, "compare": "true"}, headers=self.admin)
+        self.assertEqual(result.status_code, 200)
+        payload = result.json()
+        self.assertEqual(payload["query"], "保养")
+        self.assertEqual(len(payload["results"]), 2)
+        self.assertEqual(payload["results"][0]["sheet_name"], "工作表 <b>一</b>")
+        self.assertEqual(payload["comparison"]["hybrid_rerank"][0]["score"], 0.0)
+        self.assertEqual(payload["comparison"]["hybrid_rerank"][0]["score_type"], "rerank")
+        retriever = self.app.state.test_retriever
+        self.assertEqual([(r, b) for _, _, r, b in retriever.calls], [(True, True), (False, False), (False, True), (True, True)])
+        self.assertTrue(retriever.enable_rerank and retriever.enable_bm25)
+
+    def test_search_empty_validation_and_permissions(self):
+        result = self.client.post("/api/kb/search", data={"query": "没有资料"}, headers=self.admin)
+        self.assertEqual(result.json()["results"], [])
+        for query in (" ", "x" * 2001):
+            result = self.client.post("/api/kb/search", data={"query": query}, headers=self.admin)
+            self.assertEqual(result.json()["code"], 40046)
+        result = self.client.post("/api/kb/search", data={"query": "保养", "top_k": 21}, headers=self.admin)
+        self.assertEqual(result.status_code, 422)
+        for headers, code in [({}, 401), (self.user, 403)]:
+            self.assertEqual(self.client.post("/api/kb/search", data={"query": "保养"}, headers=headers).status_code, code)
+
+    def test_comparison_failure_does_not_change_shared_flags(self):
+        with self.assertRaisesRegex(RuntimeError, "模拟对比异常"):
+            self.client.post("/api/kb/search", data={"query": "对比异常", "compare": "true"}, headers=self.admin)
+        retriever = self.app.state.test_retriever
+        self.assertTrue(retriever.enable_rerank and retriever.enable_bm25)
 
 
 if __name__ == "__main__":

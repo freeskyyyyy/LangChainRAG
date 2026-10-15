@@ -1,7 +1,7 @@
 """Offline RAG behavior checks: python -m unittest tests.test_rag_regression -v.
 
 Retrieval and generation are mocked; no database or provider calls are made.
-Failures describe behavioral requirements, including previously existing defects.
+Includes model identity, general knowledge fallback and dialogue isolation.
 """
 
 import asyncio
@@ -12,7 +12,7 @@ from unittest.mock import Mock, patch
 from app.core.config import settings
 from app.core.logging import logger
 from app.rag.chain import RAGChain
-from app.rag.prompt import build_rag_prompt
+from app.rag.prompt import build_general_prompt, build_rag_prompt
 from app.rag.semantic_cache import SemanticCache
 
 
@@ -62,6 +62,106 @@ def stream(chain, question="Python 是什么？", **kwargs):
 
 
 class RAGRegressionTests(unittest.TestCase):
+    def test_model_identity_uses_configuration_without_provider_calls(self):
+        for question in ["你的模型是什么", "你是什么模型？", "请问你使用什么模型？", "你用的模型是什么", "你基于哪个大模型？"]:
+            with self.subTest(question=question):
+                chain, generator = make_chain()
+                chain.enable_cache = True
+                with patch("app.rag.chain.get_semantic_cache") as get_cache, \
+                     patch.object(settings, "LLM_MODEL", "configured-test-model"):
+                    result = chain.ask(question)
+                self.assertIn("configured-test-model", result["answer"])
+                self.assertEqual(result["knowledge_source"], "system")
+                self.assertEqual(result["citations"], [])
+                self.assertFalse(result["no_answer"])
+                self.assertFalse(generator.inputs)
+                chain.retriever.retrieve.assert_not_called()
+                chain.rewriter.rewrite.assert_not_called()
+                get_cache.assert_not_called()
+
+    def test_model_identity_stream_completes_without_network(self):
+        chain, _ = make_chain()
+        events = stream(chain, "你的模型是什么？")
+        answer = "".join(e["data"]["text"] for e in events if e["event"] == "token")
+        self.assertIn(settings.LLM_MODEL, answer)
+        self.assertEqual(events[-1]["data"]["knowledge_source"], "system")
+        self.assertEqual(events[-1]["event"], "done")
+        chain._get_prompt_chain.assert_not_called()
+        chain.retriever.retrieve.assert_not_called()
+
+    def test_other_model_questions_are_not_intercepted(self):
+        chain, generator = make_chain(answer="数学模型是对现实系统的数学描述。")
+        result = chain.ask("什么是数学模型？")
+        self.assertEqual(result["knowledge_source"], "general")
+        self.assertTrue(generator.inputs)
+
+    def test_retrieval_exception_still_generates_general_answer(self):
+        chain, generator = make_chain()
+        chain.retriever.retrieve.side_effect = RuntimeError("unavailable index")
+        result = chain.ask("Python 是什么？")
+        self.assertEqual(result["knowledge_source"], "general")
+        self.assertEqual(result["citations"], [])
+        self.assertTrue(generator.inputs)
+
+    def test_keyword_overlap_does_not_attach_unrelated_citations(self):
+        chain, _ = make_chain([chunk()], "地球自转形成昼夜交替。")
+        result = chain.ask("地球为什么会有昼夜交替？")
+        self.assertEqual(result["knowledge_source"], "general")
+        self.assertEqual(result["citations"], [])
+
+    def test_stream_keyword_overlap_does_not_attach_unrelated_citations(self):
+        chain, _ = make_chain([chunk()], "地球绕太阳公转。")
+        events = stream(chain, "地球绕什么公转？")
+        self.assertEqual(events[-1]["data"]["knowledge_source"], "general")
+        self.assertEqual(next(e["data"] for e in events if e["event"] == "citations"), [])
+
+    def test_retrieval_exception_stream_still_completes(self):
+        chain, _ = make_chain()
+        chain.retriever.retrieve.side_effect = RuntimeError("unavailable index")
+        events = stream(chain)
+        self.assertEqual(events[-1]["event"], "done")
+        self.assertEqual(events[-1]["data"]["knowledge_source"], "general")
+
+    def test_general_generation_uses_separate_prompt(self):
+        from langchain_core.runnables import RunnableLambda
+
+        captured = []
+        def generate(prompt):
+            captured.extend(prompt.to_messages())
+            return "按通用知识回答：地球绕太阳公转。"
+
+        chain, _ = make_chain()
+        with patch.object(chain, "_get_llm", return_value=RunnableLambda(generate)):
+            pipeline = RAGChain._get_prompt_chain(chain, knowledge_source="general")
+            answer = pipeline.invoke({"context": "无关的衣服资料", "question": "地球绕什么公转？", "history": "用户问：太阳系"})
+        self.assertIn("地球", answer)
+        self.assertIn("通用问答助手", captured[0].content)
+        self.assertNotIn("无关的衣服资料", captured[0].content)
+        self.assertIn("用户问：太阳系", captured[0].content)
+
+    def test_general_prompt_formats_without_history(self):
+        messages = build_general_prompt().format_messages(question="地球绕什么公转？")
+        self.assertEqual(messages[-1].content, "地球绕什么公转？")
+        self.assertIn("不要因为用户没有上传相关文件而拒绝回答", messages[0].content)
+
+    def test_network_failure_has_actionable_message(self):
+        from requests.exceptions import ConnectionError
+
+        chain, _ = make_chain()
+        chain._get_prompt_chain.side_effect = ConnectionError("network access denied")
+        events = stream(chain)
+        self.assertEqual(events[-1]["event"], "error")
+        self.assertIn("联网权限", events[-1]["data"]["message"])
+
+    def test_history_is_not_written_to_shared_question_cache(self):
+        chain, _ = make_chain()
+        chain.enable_cache = True
+        cache = Mock()
+        with patch("app.rag.chain.get_semantic_cache", return_value=cache):
+            chain.ask("地球绕什么公转？", history=[{"role": "user", "content": "我们在讨论太阳系"}])
+        cache.lookup.assert_not_called()
+        cache.store.assert_not_called()
+
     def test_empty_retrieval_generates_general_answer(self):
         chain, generator = make_chain()
         result = chain.ask("Python 是什么？")
@@ -85,7 +185,7 @@ class RAGRegressionTests(unittest.TestCase):
         self.assertIn("纯棉", generator.inputs[0]["context"])
 
     def test_rerank_threshold_boundary_is_inclusive(self):
-        chain, _ = make_chain([chunk(settings.RERANK_SCORE_THRESHOLD)])
+        chain, _ = make_chain([chunk(settings.RERANK_SCORE_THRESHOLD)], "水温不超过30℃。[1]")
         self.assertEqual(chain.ask("纯棉怎么洗？")["knowledge_source"], "knowledge_base")
 
     def test_vector_threshold_is_independent(self):

@@ -214,11 +214,11 @@ class SessionService:
         stmt = (
             select(Message)
             .where(Message.session_id == session_id)
-            .order_by(Message.id.asc())
+            .order_by(Message.id.desc())
             .limit(limit)
         )
         result = await db.execute(stmt)
-        return list(result.scalars().all())
+        return list(reversed(result.scalars().all()))
 
     # ==============================================================
     # 会话标题自动生成

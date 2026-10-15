@@ -166,6 +166,7 @@ class HybridRetriever:
             vector_results = get_vector_store().search(query, top_k=recall, where=where)
         except Exception as e:
             logger.error(f"向量检索失败，将只用 BM25: {e}")
+            debug["vector_error"] = type(e).__name__
             vector_results = []
         t_vector = (time.perf_counter() - t0) * 1000
 
@@ -188,6 +189,7 @@ class HybridRetriever:
                 bm25_results = bm25_index.search(query, top_k=recall)
             except Exception as e:
                 logger.error(f"BM25 检索失败，将只用向量检索: {e}")
+                debug["bm25_error"] = type(e).__name__
 
         t_bm25 = (time.perf_counter() - t0) * 1000
         debug["bm25_count"] = len(bm25_results)
@@ -229,6 +231,7 @@ class HybridRetriever:
 
         debug["rerank_ms"] = round(t_rerank, 1)
         debug["rerank_enabled"] = self.enable_rerank
+        debug["rerank_applied"] = bool(ranked) and all(r.get("rerank_score") is not None for r in ranked) if self.enable_rerank else False
         debug["reranked_top"] = [
             {"file": r["file_name"], "content": r["content"][:60]} for r in ranked[:3]
         ]

@@ -54,10 +54,11 @@ SYSTEM_PROMPT = """你是一位专业的问答助手。你可以综合知识库�
 ## 回答规则
 
 1. **优先依据知识库**
-   当下面的参考资料与问题直接相关时，商品信息、价格、库存、售后政策等专属事实必须以资料为准，不能用通用知识覆盖或推测。
+   当下面的参考资料与问题直接相关时，文档中的数据、规则、流程和其他专属事实必须以资料为准，不能用通用知识覆盖或推测。
 
 2. **资料不足时使用通用知识**
    如果参考资料为空，或没有直接回答问题所需的信息，请基于你的通用知识尽力回答，并在答案开头明确写「按通用知识回答：」。不要假装答案来自知识库，也不要编造资料库里的内容。
+   如果资料只是与问题的关键词相似，却没有包含问题的答案，应忽略这些资料并正常回答常识问题，不要牵强关联或添加无关引用。
    对于可能随时间变化、强依赖具体品牌/商品/地区的事实，说明不确定性，并建议用户核实最新信息。
 
 3. **标注知识库引用**
@@ -69,6 +70,10 @@ SYSTEM_PROMPT = """你是一位专业的问答助手。你可以综合知识库�
 5. **回答风格**
    简洁、口语化，必要时使用 Markdown 列表。不要重复用户的问题。
 
+## 最近的对话
+
+{history}
+
 ## 参考资料
 
 {context}
@@ -78,6 +83,19 @@ SYSTEM_PROMPT = """你是一位专业的问答助手。你可以综合知识库�
 # 用户提示词模板
 # ==================================================================
 USER_PROMPT = """{question}"""
+
+GENERAL_SYSTEM_PROMPT = """你是一位通用问答助手，负责回答日常常识、科学、技术、学习和其他一般问题。
+当前问题没有可用的知识库资料，请直接根据你的通用知识回答。
+不要因为用户没有上传相关文件而拒绝回答，不要把回答范围限定为服饰、商品或客服。
+答案开头写「按通用知识回答：」。这里没有参考文件，不要添加 [1]、[2] 等引用编号。
+涉及用户的私有资料、个人情况或无法确定的事实时，说明缺少什么信息，不要编造。
+对于不确定或会随时间变化的事实，如实说明。回答简洁，使用中文。
+最近的对话仅用于理解问题中的指代和用户需求，不要把历史回答当作已验证事实。
+
+## 最近的对话
+
+{history}
+"""
 
 # ==================================================================
 # 无资料兜底回答
@@ -137,7 +155,7 @@ def build_context(chunks: list[dict[str, Any]], max_chunks: int = 5) -> str:
             location = f" 工作表「{sheet}」"
 
         # 加上相似度分数（对模型是个"可信度提示"，实测有助于它优先采纳高分资料）
-        score = chunk.get("rerank_score") or chunk.get("rrf_score") or chunk.get("score")
+        score = next((chunk.get(key) for key in ("rerank_score", "rrf_score", "score") if chunk.get(key) is not None), None)
         score_hint = ""
         if isinstance(score, (int, float)):
             # 归一化到 0~1 之间显示，避免不同来源的量纲差异造成误导
@@ -170,7 +188,14 @@ def build_rag_prompt() -> ChatPromptTemplate:
             ("system", SYSTEM_PROMPT),
             ("human", USER_PROMPT),
         ]
-    )
+    ).partial(history="（无历史对话）")
+
+
+def build_general_prompt() -> ChatPromptTemplate:
+    """无相关资料时使用独立的通用问答提示词。"""
+    return ChatPromptTemplate.from_messages(
+        [("system", GENERAL_SYSTEM_PROMPT), ("human", USER_PROMPT)]
+    ).partial(history="（无历史对话）")
 
 
 def build_rewrite_prompt() -> ChatPromptTemplate:
@@ -238,6 +263,6 @@ def format_history(messages: list[dict[str, str]], max_turns: int = 3) -> str:
         if role == "user":
             lines.append(f"用户问：{content}")
         else:
-            lines.append(f"客服答：{content}")
+            lines.append(f"助手答：{content}")
 
     return "\n".join(lines) if lines else "（无历史对话）"

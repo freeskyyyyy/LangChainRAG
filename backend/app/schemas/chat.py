@@ -92,6 +92,9 @@ class MessageOut(ORMBase):
     created_at: Optional[datetime] = None
     latency_ms: Optional[int] = Field(default=None, description="本次回答耗时（毫秒）")
     cache_hit: bool = Field(default=False, description="是否命中了缓存")
+    knowledge_source: Optional[Literal["knowledge_base", "general", "system"]] = Field(
+        default=None, description="回答来源；旧消息或未完成生成时可能未知"
+    )
     feedback: Optional[int] = Field(
         default=None, description="当前用户对这条消息的评价：1 赞 / -1 踩 / null 未评价"
     )

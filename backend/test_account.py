@@ -39,6 +39,7 @@ def create_test_app():
             yield db
 
     app = FastAPI(lifespan=lifespan)
+    app.state.test_sessions = sessions
     app.dependency_overrides[get_db] = test_db
     register_exception_handlers(app)
     app.include_router(auth_router)

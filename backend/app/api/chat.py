@@ -226,7 +226,7 @@ async def _generate_stream(data: ChatRequest, user):
         async for event in chain.astream(
             data.question,
             history=history,
-            use_cache=data.use_cache,
+            use_cache=data.use_cache and not data.regenerate,
             top_k=data.top_k,
         ):
             etype = event["event"]
@@ -249,11 +249,15 @@ async def _generate_stream(data: ChatRequest, user):
         # ---------------- 流结束，写入数据库 ----------------
         async with AsyncSessionLocal() as db:
             if assistant_content:
+                answer_source = final_stats.get("knowledge_source")
+                if answer_source not in {"knowledge_base", "general", "system"}:
+                    answer_source = None
                 assistant_msg = Message(
                     session_id=session_id,
                     role=MessageRole.ASSISTANT,
                     content=assistant_content,
                     citations=final_citations,
+                    knowledge_source=answer_source,
                     rewritten_query=final_stats.get("search_query"),
                     latency_ms=final_stats.get("latency_ms"),
                     cache_hit=bool(final_stats.get("cache_hit")),

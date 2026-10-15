@@ -75,7 +75,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # 确保数据目录都存在
     settings.ensure_dirs()
 
-    # 建表（已存在的表不会被改动）
+    # 建表，并为已有消息表补齐可空的回答来源字段。
     await init_db()
     logger.info("数据库已就绪")
 

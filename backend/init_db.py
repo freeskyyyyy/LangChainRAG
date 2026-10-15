@@ -16,7 +16,7 @@ r"""
 
 【为什么不用 Alembic 这种专业迁移工具】
 Alembic 适合团队协作和线上环境（能精确控制每次结构变更）。
-个人项目用 create_all + 重建数据库就够了，省掉一大堆配置文件。
+当前用 create_all 建表，并通过可重复执行的增量升级保留已有数据。
 将来真上线了再引入也不迟。
 """
 
@@ -56,6 +56,8 @@ async def create_tables() -> list[str]:
 
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        from app.core.database import upgrade_schema
+        await conn.run_sync(upgrade_schema)
 
         # 顺便查一下数据库里现在到底有哪些表
         tables = await conn.run_sync(lambda c: inspect(c).get_table_names())

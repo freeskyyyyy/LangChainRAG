@@ -25,7 +25,7 @@ FastAPI 是异步框架。如果数据库操作用同步写法，一个请求在
 from pathlib import Path
 from typing import AsyncGenerator
 
-from sqlalchemy import event
+from sqlalchemy import event, inspect
 from sqlalchemy.ext.asyncio import (
     AsyncSession,
     async_sessionmaker,
@@ -154,16 +154,27 @@ async def get_db() -> AsyncGenerator[AsyncSession, None]:
             raise
 
 
+def upgrade_schema(connection) -> None:
+    """为已有数据库添加可空字段，保留旧数据；重复启动不重复执行。"""
+    inspector = inspect(connection)
+    if "messages" not in inspector.get_table_names():
+        return
+    columns = {column["name"] for column in inspector.get_columns("messages")}
+    if "knowledge_source" not in columns:
+        connection.exec_driver_sql("ALTER TABLE messages ADD COLUMN knowledge_source VARCHAR(20)")
+
+
 async def init_db() -> None:
     """
     建表函数：根据 app/models/ 里的定义，在数据库中创建所有还不存在的表。
-    程序启动时调用一次。已存在的表不会被改动。
+    程序启动时调用一次，并为旧消息表补齐可空的回答来源字段。
     """
     # 这一行必须写：导入 models 才能让 SQLAlchemy 感知到所有表定义
     from app import models  # noqa: F401
 
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        await conn.run_sync(upgrade_schema)
 
 
 async def close_db() -> None:

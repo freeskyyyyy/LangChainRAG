@@ -152,6 +152,11 @@ class Message(Base):
         comment="引用的知识库片段（含文档名/页码/相似度/原文）",
     )
 
+    knowledge_source: Mapped[Optional[str]] = mapped_column(
+        String(20), nullable=True,
+        comment="回答来源：knowledge_base / general / system；旧消息未知时为空",
+    )
+
     # ------------------------------------------------------------------
     # 下面几个字段是"过程数据"，用来支撑性能优化和问题排查：
     #   rewritten_query —— 多轮改写后的完整问题（调试时能看出改写对不对）

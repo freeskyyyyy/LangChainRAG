@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>RAG 知识库问答系统 · 测试页</title>
+<title>知识库问答助手 · 测试页</title>
 <!--
   ============================================================
    单文件测试页面（不用 Vue，不装任何东西）
@@ -15,7 +15,7 @@
 
    它做的事：
      · 登录 / 注册
-     · 上传商品资料（管理员）
+      · 上传知识库资料（管理员）
      · 流式问答（打字机效果）
      · 显示引用了哪些知识库片段
 
@@ -462,8 +462,8 @@
 <!-- ==================== 登录页 ==================== -->
 <div id="login-view">
   <div class="login-card">
-    <h1>📚 RAG 知识库问答</h1>
-    <div class="sub">企业级智能客服系统 · 测试版界面</div>
+    <h1>📚 知识库问答助手</h1>
+    <div class="sub">知识库与通用知识问答 · 测试版界面</div>
 
     <div class="field">
       <label>用户名</label>
@@ -480,7 +480,7 @@
 
     <div class="hint">
       <b>管理员账号</b>：admin / 123456<br>
-      用管理员登录可以上传商品资料，并测试知识库问答。
+      用管理员登录可以上传资料，并测试知识库问答。
     </div>
   </div>
 </div>
@@ -522,17 +522,17 @@
     <div class="chat-area">
       <div class="messages" id="messages">
         <div class="welcome" id="welcome">
-          <h2>👋 你好，我是商品知识库客服</h2>
-          我会先从商品资料里查找相关信息，再基于资料回答你的问题，<br>
-          并标注每句话来自哪份文件的哪一页。
+          <h2>👋 你好，我是知识库问答助手</h2>
+          我会优先参考你上传的资料回答，并标注资料来源。<br>
+          资料不足时，也可以基于模型的通用知识回答，并说明回答依据。
           <div style="margin-top:20px">
-            <span class="sugg">电池容量是多少</span>
-            <span class="sugg">支持退货吗</span>
-            <span class="sugg">可以用花呗付款吗</span>
-            <span class="sugg">发货一般几天到</span>
+            <span class="sugg">总结已上传资料的主要内容</span>
+            <span class="sugg">资料中有哪些注意事项</span>
+            <span class="sugg">根据资料整理一份操作清单</span>
+            <span class="sugg">什么是检索增强生成（RAG）</span>
           </div>
           <div style="margin-top:22px;font-size:12.5px;color:#9ca3af">
-            （先用管理员账号上传一些商品资料，再问效果最好）
+            （用管理员账号上传资料后，可以结合资料提问）
           </div>
         </div>
       </div>

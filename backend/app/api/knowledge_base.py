@@ -24,6 +24,8 @@
 不会出现"某个接口忘了加校验"的疏漏。
 """
 
+import asyncio
+from copy import copy
 from pathlib import Path
 from typing import Annotated, Optional
 
@@ -458,13 +460,16 @@ async def search_test(
     这个接口把检索结果单独暴露出来，就能立刻分辨是 A 还是 B。
     没有它的话，你只能盯着一个错误答案瞎猜。
     """
+    query = query.strip()
+    if not query or len(query) > 2000:
+        raise BadRequestError("测试问题需要 1～2000 个字符", code=40046)
     check_rate_limit(f"search:{admin.id}")
 
     from app.rag.retriever import get_retriever
 
     retriever = get_retriever()
 
-    results, debug = retriever.retrieve(query, top_k=top_k, return_debug=True)
+    results, debug = await asyncio.to_thread(retriever.retrieve, query, top_k=top_k, return_debug=True)
 
     payload: dict = {
         "query": query,
@@ -473,6 +478,7 @@ async def search_test(
                 "rank": i + 1,
                 "file_name": r.get("file_name"),
                 "page": r.get("page"),
+                "sheet_name": r.get("sheet_name"),
                 "content": r.get("content"),
                 "parent_content": r.get("parent_content"),
                 "vector_score": r.get("score") if r.get("source") != "bm25" else None,
@@ -495,16 +501,17 @@ async def search_test(
             ("hybrid", False, True),
             ("hybrid_rerank", True, True),
         ):
-            original = (retriever.enable_rerank, retriever.enable_bm25)
-            retriever.enable_rerank, retriever.enable_bm25 = rerank, bm25
-            r = retriever.retrieve(query, top_k=top_k)
-            retriever.enable_rerank, retriever.enable_bm25 = original
+            # 每种方案使用配置副本；异常和并发请求都不改动问答的共享配置。
+            variant = copy(retriever)
+            variant.enable_rerank, variant.enable_bm25 = rerank, bm25
+            r = await asyncio.to_thread(variant.retrieve, query, top_k=top_k)
 
             payload["comparison"][name] = [
                 {
                     "rank": i + 1,
                     "file_name": x.get("file_name"),
-                    "score": x.get("rerank_score") or x.get("score"),
+                    "score": x.get("rerank_score") if x.get("rerank_score") is not None else x.get("score"),
+                    "score_type": "rerank" if x.get("rerank_score") is not None else "bm25" if x.get("source") == "bm25" else "vector",
                     "content": (x.get("content") or "")[:100],
                 }
                 for i, x in enumerate(r)
